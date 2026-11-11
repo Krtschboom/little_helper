@@ -9,6 +9,7 @@ flutter clean && flutter pub get
 
 
 ## Project Structure
+```
 little_helper/  
 ├── pubspec.yaml  
 └── lib/  
@@ -23,7 +24,8 @@ little_helper/
         ├── database_selection_screen.dart  
         ├── settings_screen.dart  
         ├── inventory_screen.dart  
-        └── table_editor_screen.dart  
+        └── table_editor_screen.dart
+```
 
 ## Getting Started
 
