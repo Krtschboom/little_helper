@@ -8,21 +8,21 @@
 # Mainscreen
 - [x] Button to go back to db selection (top left)
 - [ ] don't show which db was opened
-- [ ] three dot settingsmenu (top right)
+- [x] three dot settingsmenu (top right)
 - [ ] extra buttons:
   - checklist
   - alerts
   - notes
 
 # Settingmenu main
-- [ ] Change colors of Objects in app
-- [ ] Light/dark theme
+- [x] Change colors of Objects in app
+- [x] Light/dark theme
 - [ ] Change db password
 - [ ] export db, config
 - [ ] future thingy, sync between android/linux/windows app
 
 # Inventory
-- [ ] import new table via csv, check row names and set datatype
+- [x] import new table via csv, check row names and set datatype
 - [ ] scan Barcodes to get information (select if barcode is Product like groceries or books, fetch information, ask for permission), choose what goes where once and save it for future scans in the same table
 - [ ] ability to save pictures liked to specific item in table, choose between gallry and take a picture
 - [ ] ability to link .md files to items
