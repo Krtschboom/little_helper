@@ -2,28 +2,30 @@
 
 A new Flutter project.
 
-Database is saved under ~/Documents
-config is saved under ~/.local/share/com.example.little_helper/
+Database is saved under ~/Documents  
+config is saved under ~/.local/share/com.example.little_helper/  
 
 flutter clean && flutter pub get
 
 
 ## Project Structure
-little_helper/
-├── pubspec.yaml
-└── lib/
-    ├── main.dart
-    ├── services/
-    │   ├── config_service.dart
-    │   ├── db_service.dart
-    │   └── app_settings.dart
-    └── screens/
-        ├── setup_screen.dart
-        ├── home_screen.dart
-        ├── database_selection_screen.dart
-        ├── settings_screen.dart
-        ├── inventory_screen.dart
+```
+little_helper/  
+├── pubspec.yaml  
+└── lib/  
+    ├── main.dart  
+    ├── services/  
+    │   ├── config_service.dart  
+    │   ├── db_service.dart  
+    │   └── app_settings.dart  
+    └── screens/  
+        ├── setup_screen.dart  
+        ├── home_screen.dart  
+        ├── database_selection_screen.dart  
+        ├── settings_screen.dart  
+        ├── inventory_screen.dart  
         └── table_editor_screen.dart
+```
 
 ## Getting Started
 
