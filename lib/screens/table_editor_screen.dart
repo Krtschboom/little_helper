@@ -144,7 +144,7 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
           content: TextField(
             controller: controller,
             autofocus: true,
-            decoration: InputDecoration(
+            decoration: const InputDecoration(
               hintText: 'NULL eingeben für einen leeren Wert',
             ),
           ),
@@ -283,7 +283,9 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
     );
 
     if (confirmed != true) {
-      textControllers.values.forEach((c) => c.dispose());
+      for (var c in textControllers.values) {
+        c.dispose();
+      }
       return;
     }
 
@@ -299,7 +301,9 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
         final text = textControllers[c]!.text;
         return text.isEmpty ? null : _parse(text, c);
       }).toList();
-      textControllers.values.forEach((c) => c.dispose());
+      for (var c in textControllers.values) {
+        c.dispose();
+      }
 
       _db.execute(
         'INSERT INTO $_table ($colSql) VALUES ($placeholders)',

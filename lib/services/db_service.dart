@@ -106,15 +106,22 @@ class DbService {
     try {
       if (password != null && password.isNotEmpty) {
         db.execute("PRAGMA key = '${_escape(password)}'");
-        // Throws SqliteException when the key is wrong.
-        db.select('PRAGMA cipher_version');
+        db.select('SELECT count(*) FROM sqlite_master'); // throws on wrong key
       } else {
-        // Plain file: accessing the schema throws if it is actually
-        // encrypted ("file is not a database").
-        db.select('PRAGMA schema_version');
+        db.select('SELECT count(*) FROM sqlite_master');
       }
+
+      // if (password != null && password.isNotEmpty) {
+      //   db.execute("PRAGMA key = '${_escape(password)}'");
+      //   // Throws SqliteException when the key is wrong.
+      //   db.select('PRAGMA cipher_version');
+      // } else {
+      //   // Plain file: accessing the schema throws if it is actually
+      //   // encrypted ("file is not a database").
+      //   db.select('PRAGMA schema_version');
+      // }
     } catch (e) {
-      db.dispose();
+      db.close();
       rethrow;
     }
     _db = db;
@@ -156,7 +163,7 @@ class DbService {
         )
       ''');
     } catch (e) {
-      db.dispose();
+      db.close();
       File(path).deleteSync(); // clean up broken file
       rethrow;
     }
@@ -166,7 +173,7 @@ class DbService {
   }
 
   Future<void> close() async {
-    _db?.dispose();
+    _db?.close();
     _db = null;
     _path = null;
     _password = null; // wipe the open-database password
