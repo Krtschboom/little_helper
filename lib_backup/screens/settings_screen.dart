@@ -38,7 +38,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               for (final option in settingsPalette)
                 _ColorSwatch(
                   option: option,
-                  selected: settings.seedColor.value == option.color.value,
+                  selected: settings.seedColor.toARGB32() == option.color.toARGB32(),
                   onTap: () => settings.setSeedColor(option.color),
                 ),
             ],

@@ -18,6 +18,16 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
   List<String> _columns = [];
   List<Map<String, Object?>> _rows = [];
   String? _error;
+  String _search = '';
+  String? _sortColumn;
+  bool _sortAscending = true;
+  final _searchCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
 
   Database get _db => DbService.instance.database;
   String get _table => '"${widget.table}"';
@@ -144,7 +154,7 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
           content: TextField(
             controller: controller,
             autofocus: true,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               hintText: 'NULL eingeben für einen leeren Wert',
             ),
           ),
@@ -283,9 +293,7 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
     );
 
     if (confirmed != true) {
-      for (var c in textControllers.values) {
-        c.dispose();
-      }
+      textControllers.values.forEach((c) => c.dispose());
       return;
     }
 
@@ -301,9 +309,7 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
         final text = textControllers[c]!.text;
         return text.isEmpty ? null : _parse(text, c);
       }).toList();
-      for (var c in textControllers.values) {
-        c.dispose();
-      }
+      textControllers.values.forEach((c) => c.dispose());
 
       _db.execute(
         'INSERT INTO $_table ($colSql) VALUES ($placeholders)',
@@ -359,6 +365,43 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
     );
   }
 
+  /// Rows filtered by the search text and sorted by the selected
+  /// column (if any). Sorting compares numbers numerically and
+  /// everything else as lowercase text; NULL always comes last.
+  List<Map<String, Object?>> get _visibleRows {
+    Iterable<Map<String, Object?>> rows = _rows;
+    final query = _search.trim().toLowerCase();
+    if (query.isNotEmpty) {
+      rows = rows.where((row) => _columns.any(
+          (c) => (row[c]?.toString() ?? '').toLowerCase().contains(query)));
+    }
+    final col = _sortColumn;
+    if (col == null || !_columns.contains(col)) return rows.toList();
+
+    final sorted = [...rows]..sort((a, b) {
+        final av = a[col];
+        final bv = b[col];
+        if (av == null && bv == null) return 0;
+        if (av == null) return 1; // NULLs last
+        if (bv == null) return -1;
+        final an = num.tryParse(av.toString());
+        final bn = num.tryParse(bv.toString());
+        final cmp = (an != null && bn != null)
+            ? an.compareTo(bn)
+            : av.toString().toLowerCase().compareTo(
+                bv.toString().toLowerCase());
+        return _sortAscending ? cmp : -cmp;
+      });
+    return sorted;
+  }
+
+  void _setSort(String column, bool ascending) {
+    setState(() {
+      _sortColumn = column;
+      _sortAscending = ascending;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_error != null) {
@@ -369,7 +412,39 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
     }
 
     return Scaffold(
-      appBar: AppBar(title: Text(widget.table)),
+      appBar: AppBar(
+        title: Text(widget.table),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(56),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: TextField(
+              controller: _searchCtrl,
+              decoration: InputDecoration(
+                hintText: 'In allen Spalten suchen...',
+                prefixIcon: const Icon(Icons.search),
+                isDense: true,
+                filled: true,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+                suffixIcon: _search.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.close),
+                        tooltip: 'Suche löschen',
+                        onPressed: () {
+                          _searchCtrl.clear();
+                          setState(() => _search = '');
+                        },
+                      ),
+              ),
+              onChanged: (v) => setState(() => _search = v),
+            ),
+          ),
+        ),
+      ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _addRow,
         icon: const Icon(Icons.add),
@@ -384,12 +459,41 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
                   padding: EdgeInsets.all(32),
                   child: Text('Keine Einträge.'),
                 )
-              : DataTable(
-                  columns: [
-                    ..._columns.map((c) => DataColumn(label: Text(c))),
-                    const DataColumn(label: Text('')), // delete
-                  ],
-                  rows: _rows.map((row) {
+              : _visibleRows.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.all(32),
+                      child: Text('Kein Treffer für die Suche.'),
+                    )
+                  : DataTable(
+                      columns: [
+                        ..._columns.map(
+                          (c) => DataColumn(
+                            label: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(c),
+                                if (_sortColumn == c)
+                                  Icon(
+                                    _sortAscending
+                                        ? Icons.arrow_upward
+                                        : Icons.arrow_downward,
+                                    size: 16,
+                                  ),
+                              ],
+                            ),
+                            tooltip: 'Klicken zum Sortieren',
+                            onSort: (i, _) => _setSort(
+                              c,
+                              // DataTable always passes ascending=true
+                              // when sortColumnIndex is unset, so we
+                              // toggle the direction ourselves.
+                              _sortColumn == c ? !_sortAscending : true,
+                            ),
+                          ),
+                        ),
+                        const DataColumn(label: Text('')), // delete
+                      ],
+                      rows: _visibleRows.map((row) {
                     final rowid = row['_rowid_'] as int;
                     return DataRow(
                       cells: [

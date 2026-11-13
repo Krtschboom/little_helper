@@ -118,7 +118,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                               flex: 2,
                               child: DropdownButtonFormField<String>(
                                 isExpanded: true,
-                                value: col.type,
+                                initialValue: col.type,
                                 items: const [
                                   DropdownMenuItem(
                                     value: 'TEXT',
@@ -308,7 +308,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                             flex: 2,
                             child: DropdownButtonFormField<String>(
                               isExpanded: true,
-                              value: col.type,
+                              initialValue: col.type,
                               items: typeItems,
                               onChanged: (v) =>
                                   setDialogState(() => col.type = v!),
@@ -347,8 +347,12 @@ class _InventoryScreenState extends State<InventoryScreen> {
     );
 
     if (confirmed != true) {
-      renameCtrl.values.forEach((c) => c.dispose());
-      newColumns.forEach((c) => c.nameCtrl.dispose());
+      for (var c in renameCtrl.values) {
+        c.dispose();
+      }
+      for (var c in newColumns) {
+        c.nameCtrl.dispose();
+      }
       return;
     }
 
@@ -382,8 +386,12 @@ class _InventoryScreenState extends State<InventoryScreen> {
         DbService.instance.recordColumnType(table, name, col.type);
       }
 
-      renameCtrl.values.forEach((c) => c.dispose());
-      newColumns.forEach((c) => c.nameCtrl.dispose());
+      for (var c in renameCtrl.values) {
+        c.dispose();
+      }
+      for (var c in newColumns) {
+        c.nameCtrl.dispose();
+      }
       _loadTables();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -440,11 +448,11 @@ class _InventoryScreenState extends State<InventoryScreen> {
           .toList();
       final rows = db.select('SELECT * FROM "$table"');
 
-      String csv = columns.map(_csvEscape).join(';') + '\n';
+      String csv = '${columns.map(_csvEscape).join(';')}\n';
       for (final row in rows) {
-        csv += columns
+        csv += '${columns
             .map((c) => _csvEscape(row[c]?.toString()))
-            .join(';') + '\n';
+            .join(';')}\n';
       }
 
       final path = await FilePicker.platform.saveFile(
