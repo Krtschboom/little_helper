@@ -15,7 +15,7 @@ class HomeScreen extends StatelessWidget {
       appBar: AppBar(
         leading: IconButton(
           tooltip: 'Zur Datenbank-Auswahl',
-          icon: const Icon(Icons.arrow_back),
+          icon: const Icon(Icons.storage),
           onPressed: () {
             Navigator.of(context).push(
               MaterialPageRoute(
@@ -43,7 +43,11 @@ class HomeScreen extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.check_circle, color: Colors.teal, size: 64),
+            Icon(
+              Icons.check_circle,
+              color: Theme.of(context).colorScheme.primary,
+              size: 64,
+            ),
             const SizedBox(height: 12),
             Text(
               'Datenbank verbunden: ${DbService.instance.path}',

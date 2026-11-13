@@ -1,6 +1,3 @@
-import 'dart:typed_data';
-
-import 'package:file_picker/file_picker.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -10,6 +7,9 @@ import 'package:sqlite3/sqlite3.dart' show ResultSet;
 
 import '../services/db_service.dart';
 import 'table_editor_screen.dart';
+
+/// Quotes a table/column name for SQL (doubles any `"` inside it).
+String _q(String name) => DbService.quoteIdentifier(name);
 
 /// Lists all tables of the database and lets the user create new ones.
 class InventoryScreen extends StatefulWidget {
@@ -30,10 +30,11 @@ class _InventoryScreenState extends State<InventoryScreen> {
 
   void _loadTables() {
     final ResultSet result = DbService.instance.database.select(
-      "SELECT name FROM sqlite_master "
-      "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
-      "AND name NOT LIKE '_app_%' "
-      "ORDER BY name",
+      r"SELECT name FROM sqlite_master "
+      r"WHERE type = 'table' "
+      r"AND name NOT LIKE 'sqlite\_%' ESCAPE '\' "
+      r"AND name NOT LIKE '\_app\_%' ESCAPE '\' "
+      r"ORDER BY name",
     );
     setState(() {
       _tables = result.map((row) => row['name'] as String).toList();
@@ -221,7 +222,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   final colDefs = columns
                       .where((c) => c.nameCtrl.text.trim().isNotEmpty)
                       .map((c) =>
-                          '"${c.nameCtrl.text.trim()}" '
+                          '${_q(c.nameCtrl.text.trim())} '
                           '${sqliteTypes[c.type] ?? c.type}')
                       .toList();
                   if (colDefs.isEmpty) return;
@@ -229,7 +230,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                     context,
                     (
                       name: name,
-                      sql: 'CREATE TABLE "$name" (${colDefs.join(', ')})',
+                      sql: 'CREATE TABLE ${_q(name)} (${colDefs.join(', ')})',
                       columns: columns
                           .where((c) => c.nameCtrl.text.trim().isNotEmpty)
                           .map((c) => (
@@ -255,7 +256,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
   /// DATUM or BOOLEAN.
   Future<void> _editColumns(String table) async {
     final db = DbService.instance.database;
-    final columns = (db.select('PRAGMA table_info("$table")'))
+    final columns = (db.select('PRAGMA table_info(${_q(table)})'))
         .map((c) => c['name'] as String)
         .toList();
 
@@ -395,14 +396,14 @@ class _InventoryScreenState extends State<InventoryScreen> {
     try {
       for (final c in columns) {
         if (deleted.contains(c)) {
-          db.execute('ALTER TABLE "$table" DROP COLUMN "$c"');
+          db.execute('ALTER TABLE ${_q(table)} DROP COLUMN ${_q(c)}');
           DbService.instance.deleteColumnType(table, c);
           continue;
         }
         final renamed = renameCtrl[c]!.text.trim();
         if (renamed.isNotEmpty && renamed != c) {
           db.execute(
-            'ALTER TABLE "$table" RENAME COLUMN "$c" TO "$renamed"',
+            'ALTER TABLE ${_q(table)} RENAME COLUMN ${_q(c)} TO ${_q(renamed)}',
           );
           // Move the recorded type along with the rename.
           final type = DbService.instance.columnType(table, c);
@@ -416,7 +417,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
         final name = col.nameCtrl.text.trim();
         if (name.isEmpty) continue;
         db.execute(
-          'ALTER TABLE "$table" ADD COLUMN "$name" '
+          'ALTER TABLE ${_q(table)} ADD COLUMN ${_q(name)} '
           '${sqliteTypes[col.type] ?? col.type}',
         );
         DbService.instance.recordColumnType(table, name, col.type);
@@ -468,7 +469,9 @@ class _InventoryScreenState extends State<InventoryScreen> {
 
     try {
       DbService.instance.database
-          .execute('ALTER TABLE "$table" RENAME TO "$newName"');
+          .execute('ALTER TABLE ${_q(table)} RENAME TO ${_q(newName)}');
+      // Move the recorded DATUM/BOOLEAN types to the new table name.
+      DbService.instance.renameTableTypes(table, newName);
       _loadTables();
     } catch (e) {
       _showError(e);
@@ -522,7 +525,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
         db.execute(definition.sql);
         final placeholders = List.filled(header.length, '?').join(', ');
         final insertSql =
-            'INSERT INTO "${definition.name}" VALUES ($placeholders)';
+            'INSERT INTO ${_q(definition.name)} VALUES ($placeholders)';
         // sqlite3's execute() takes no parameters - use a prepared
         // statement instead.
         final stmt = db.prepare(insertSql);
@@ -694,13 +697,13 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   };
                   final colDefs = [
                     for (var i = 0; i < columnNames.length; i++)
-                      '"${columnNames[i]}" ${sqliteTypes[types[i]] ?? types[i]}',
+                      '${_q(columnNames[i])} ${sqliteTypes[types[i]] ?? types[i]}',
                   ];
                   Navigator.pop(
                     context,
                     (
                       name: name,
-                      sql: 'CREATE TABLE "$name" (${colDefs.join(', ')})',
+                      sql: 'CREATE TABLE ${_q(name)} (${colDefs.join(', ')})',
                       columns: [
                         for (var i = 0; i < columnNames.length; i++)
                           (name: columnNames[i], type: types[i]),
@@ -822,21 +825,25 @@ class _InventoryScreenState extends State<InventoryScreen> {
   Future<void> _exportTable(String table) async {
     try {
       final db = DbService.instance.database;
-      final columns = (db.select('PRAGMA table_info("$table")'))
+      final columns = (db.select('PRAGMA table_info(${_q(table)})'))
           .map((c) => c['name'] as String)
           .toList();
-      final rows = db.select('SELECT * FROM "$table"');
+      final rows = db.select('SELECT * FROM ${_q(table)}');
 
-      String csv = '${columns.map(_csvEscape).join(';')}\n';
+      // StringBuffer instead of `csv += ...` (which copies the whole
+      // text for every row).
+      final buffer = StringBuffer()
+        ..writeln(columns.map(_csvEscape).join(';'));
       for (final row in rows) {
-        csv += '${columns
-            .map((c) => _csvEscape(row[c]?.toString()))
-            .join(';')}\n';
+        buffer.writeln(
+          columns.map((c) => _csvEscape(row[c]?.toString())).join(';'),
+        );
       }
 
       final path = await FilePicker.platform.saveFile(
         fileName: '$table.csv',
-        bytes: Uint8List.fromList(csv.codeUnits),
+        // utf8.encode (not codeUnits): umlauts must be written as UTF-8.
+        bytes: Uint8List.fromList(utf8.encode(buffer.toString())),
       );
       if (path == null) return; // user cancelled
       if (mounted) {
@@ -853,7 +860,10 @@ class _InventoryScreenState extends State<InventoryScreen> {
   String _csvEscape(String? value) {
     final v = value ?? '';
     final needsQuotes =
-        v.contains(';') || v.contains('"') || v.contains('\n');
+        v.contains(';') ||
+        v.contains('"') ||
+        v.contains('\n') ||
+        v.contains('\r');
     final escaped = v.replaceAll('"', '""');
     return needsQuotes ? '"$escaped"' : escaped;
   }
@@ -886,7 +896,8 @@ class _InventoryScreenState extends State<InventoryScreen> {
     if (confirmed != true) return;
 
     try {
-      DbService.instance.database.execute('DROP TABLE "$table"');
+      DbService.instance.database.execute('DROP TABLE ${_q(table)}');
+      DbService.instance.deleteTableTypes(table);
       _loadTables();
     } catch (e) {
       _showError(e);

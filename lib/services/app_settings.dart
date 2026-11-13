@@ -34,6 +34,7 @@ class AppSettings extends ChangeNotifier {
     _seedColor = color;
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
+    // toARGB32() replaces the deprecated Color.value.
     await prefs.setInt(_colorKey, color.toARGB32());
   }
 

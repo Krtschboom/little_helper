@@ -1,6 +1,10 @@
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:sqlite3/sqlite3.dart' show ResultSet;
 
@@ -36,7 +40,39 @@ class _InventoryScreenState extends State<InventoryScreen> {
     });
   }
 
+  /// FAB: choose between creating an empty table manually or
+  /// importing an existing CSV file.
   Future<void> _createTable() async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.grid_on_outlined),
+              title: const Text('Neue Tabelle erstellen'),
+              subtitle: const Text('Spalten und Typen selbst festlegen'),
+              onTap: () => Navigator.pop(context, 'manual'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.upload_file),
+              title: const Text('CSV importieren'),
+              subtitle: const Text('Spaltennamen aus der Datei übernehmen'),
+              onTap: () => Navigator.pop(context, 'csv'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null) return;
+
+    if (choice == 'csv') {
+      await _importCsv();
+      return;
+    }
+
     final definition = await _promptNewTable();
     if (definition == null) return;
 
@@ -437,6 +473,349 @@ class _InventoryScreenState extends State<InventoryScreen> {
     } catch (e) {
       _showError(e);
     }
+  }
+
+  /// Imports a CSV file as a new table. The column names are taken
+  /// from the header row, the types are auto-detected and can be
+  /// adjusted per column before creating the table.
+  Future<void> _importCsv() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+      withData: true, // read the bytes directly (also needed on Linux)
+    );
+    final file = result?.files.single;
+    if (file == null || file.bytes == null) return; // user cancelled
+
+    final content = utf8.decode(file.bytes!, allowMalformed: true);
+    final delim = _sniffDelimiter(content);
+    final rows = _parseCsv(content, delim);
+    if (rows.isEmpty) {
+      _showError('Die CSV-Datei ist leer.');
+      return;
+    }
+
+    final header = rows.first;
+    final dataRows = rows.skip(1).toList();
+    if (header.isEmpty || header.every((h) => h.trim().isEmpty)) {
+      _showError('Die CSV-Datei hat keine gültige Kopfzeile.');
+      return;
+    }
+
+    // Auto-detect a type for every column from its values.
+    final types = <String>[];
+    for (var i = 0; i < header.length; i++) {
+      final values = dataRows
+          .map((r) => i < r.length ? r[i].trim() : '')
+          .toList();
+      types.add(_guessType(values));
+    }
+
+    final definition = await _promptCsvImport(file.name, header, types);
+    if (definition == null) return;
+
+    try {
+      final db = DbService.instance.database;
+      // All-or-nothing: build the table and insert everything inside
+      // one transaction.
+      db.execute('BEGIN');
+      try {
+        db.execute(definition.sql);
+        final placeholders = List.filled(header.length, '?').join(', ');
+        final insertSql =
+            'INSERT INTO "${definition.name}" VALUES ($placeholders)';
+        // sqlite3's execute() takes no parameters - use a prepared
+        // statement instead.
+        final stmt = db.prepare(insertSql);
+        try {
+          for (final row in dataRows) {
+            stmt.execute([
+              for (var i = 0; i < header.length; i++)
+                _convertValue(
+                  i < row.length ? row[i].trim() : '',
+                  definition.columns[i].type,
+                ),
+            ]);
+          }
+        } finally {
+          stmt.dispose();
+        }
+        db.execute('COMMIT');
+      } catch (_) {
+        db.execute('ROLLBACK');
+        rethrow;
+      }
+      // Remember DATUM/BOOLEAN choices for the date picker / checkbox UI.
+      for (final col in definition.columns) {
+        DbService.instance
+            .recordColumnType(definition.name, col.name, col.type);
+      }
+      _loadTables();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '"${definition.name}" importiert '
+              '(${dataRows.length} Zeilen)',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      _showError(e);
+    }
+  }
+
+  /// Import dialog: table name plus one type dropdown per CSV column,
+  /// pre-filled with the auto-detected type.
+  Future<({String name, String sql, List<({String name, String type})> columns})?>
+      _promptCsvImport(
+    String fileName,
+    List<String> header,
+    List<String> guessedTypes,
+  ) {
+    final nameCtrl = TextEditingController();
+    // Suggest the file name (without extension) as table name.
+    final baseName = fileName.replaceAll(RegExp(r'\.csv$', caseSensitive: false), '').trim();
+    nameCtrl.text = baseName;
+
+    final types = <String>[...guessedTypes];
+    final usedNames = <String>{};
+    // Make duplicate/empty column names unique.
+    final columnNames = <String>[];
+    for (final h in header) {
+      var name = h.trim();
+      if (name.isEmpty) name = 'Spalte';
+      var candidate = name;
+      var n = 2;
+      while (usedNames.contains(candidate)) {
+        candidate = '$name $n';
+        n++;
+      }
+      usedNames.add(candidate);
+      columnNames.add(candidate);
+    }
+
+    return showModalBottomSheet<
+        ({String name, String sql, List<({String name, String type})> columns})>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => Padding(
+          padding: EdgeInsets.only(
+            left: 24,
+            right: 24,
+            top: 8,
+            bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'CSV importieren',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Spaltennamen wurden aus der Datei übernommen – '
+                'Typen kannst du anpassen.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: nameCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Tabellenname',
+                ),
+              ),
+              const SizedBox(height: 12),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: header.length,
+                  itemBuilder: (context, i) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          flex: 3,
+                          child: Text(
+                            columnNames[i],
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          flex: 2,
+                          child: DropdownButtonFormField<String>(
+                            isExpanded: true,
+                            initialValue: types[i],
+                            items: const [
+                              DropdownMenuItem(
+                                value: 'TEXT',
+                                child: Text('TEXT'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'INTEGER',
+                                child: Text('INTEGER'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'REAL',
+                                child: Text('REAL'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'DATUM',
+                                child: Text('DATUM'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'BOOLEAN',
+                                child: Text('BOOLEAN'),
+                              ),
+                            ],
+                            onChanged: (v) =>
+                                setSheetState(() => types[i] = v!),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () {
+                  final name = nameCtrl.text.trim();
+                  if (name.isEmpty) return;
+                  const sqliteTypes = {
+                    'DATUM': 'TEXT',
+                    'BOOLEAN': 'INTEGER',
+                  };
+                  final colDefs = [
+                    for (var i = 0; i < columnNames.length; i++)
+                      '"${columnNames[i]}" ${sqliteTypes[types[i]] ?? types[i]}',
+                  ];
+                  Navigator.pop(
+                    context,
+                    (
+                      name: name,
+                      sql: 'CREATE TABLE "$name" (${colDefs.join(', ')})',
+                      columns: [
+                        for (var i = 0; i < columnNames.length; i++)
+                          (name: columnNames[i], type: types[i]),
+                      ],
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.check),
+                label: const Text('Importieren'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Guesses the column type from all non-empty values of a column.
+  String _guessType(List<String> values) {
+    final nonEmpty =
+        values.where((v) => v.isNotEmpty).toList();
+    if (nonEmpty.isEmpty) return 'TEXT';
+
+    final intRegex = RegExp(r'^-?\d+$');
+    final dateRegex = RegExp(r'^\d{4}-\d{2}-\d{2}$');
+    const boolValues = {'true', 'false', 'ja', 'nein', 'wahr', 'falsch'};
+
+    bool all(bool Function(String) test) => nonEmpty.every(test);
+
+    if (all((v) => intRegex.hasMatch(v))) return 'INTEGER';
+    if (all((v) => double.tryParse(v.replaceAll(',', '.')) != null)) {
+      return 'REAL';
+    }
+    if (all((v) => dateRegex.hasMatch(v))) return 'DATUM';
+    if (all((v) => boolValues.contains(v.toLowerCase()))) return 'BOOLEAN';
+    return 'TEXT';
+  }
+
+  /// Converts a raw CSV value to the value inserted for the given
+  /// logical type (DATUM stays TEXT, BOOLEAN becomes 0/1).
+  Object? _convertValue(String raw, String type) {
+    if (raw.isEmpty) return null;
+    switch (type) {
+      case 'INTEGER':
+        return int.tryParse(raw) ?? int.tryParse(raw.split('.').first);
+      case 'REAL':
+        return double.tryParse(raw.replaceAll(',', '.'));
+      case 'BOOLEAN':
+        final v = raw.toLowerCase();
+        const truthy = {'1', 'true', 'ja', 'wahr', 'yes'};
+        return truthy.contains(v) ? 1 : 0;
+      default: // TEXT, DATUM
+        return raw;
+    }
+  }
+
+  /// Detects whether the file uses ';' or ',' as separator by
+  /// counting both in the first lines.
+  String _sniffDelimiter(String content) {
+    var semis = 0;
+    var commas = 0;
+    for (final line in content.split('\n').take(5)) {
+      semis += ';'.allMatches(line).length;
+      commas += ','.allMatches(line).length;
+    }
+    return commas > semis ? ',' : ';';
+  }
+
+  /// Parses CSV content into rows, honouring quoted fields that may
+  /// contain the delimiter, escaped quotes (""), and newlines.
+  List<List<String>> _parseCsv(String content, String delim) {
+    final rows = <List<String>>[];
+    final row = <String>[];
+    final sb = StringBuffer();
+    var inQuotes = false;
+
+    for (var i = 0; i < content.length; i++) {
+      final ch = content[i];
+      if (inQuotes) {
+        if (ch == '"') {
+          if (i + 1 < content.length && content[i + 1] == '"') {
+            sb.write('"');
+            i++; // skip escaped quote
+          } else {
+            inQuotes = false;
+          }
+        } else {
+          sb.write(ch);
+        }
+      } else if (ch == '"') {
+        inQuotes = true;
+      } else if (ch == delim) {
+        row.add(sb.toString());
+        sb.clear();
+      } else if (ch == '\r' || ch == '\n') {
+        if (ch == '\r' && i + 1 < content.length && content[i + 1] == '\n') {
+          i++;
+        }
+        row.add(sb.toString());
+        sb.clear();
+        if (row.length > 1 || row.first.isNotEmpty) {
+          rows.add(List.of(row));
+        }
+        row.clear();
+      } else {
+        sb.write(ch);
+      }
+    }
+    if (sb.isNotEmpty || row.isNotEmpty) {
+      row.add(sb.toString());
+      if (row.length > 1 || row.first.isNotEmpty) {
+        rows.add(row);
+      }
+    }
+    return rows;
   }
 
   /// Exports the table content as a CSV file via a save-file dialog.
