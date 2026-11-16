@@ -112,6 +112,43 @@ class DbService {
     }
   }
 
+  /// App display type of a column when nothing was recorded: guess
+  /// from the column name (tables created outside the app), otherwise
+  /// the raw SQLite type ([sqlType] in UPPERCASE).
+  static String guessAppType(String column, String sqlType) {
+    final lower = column.toLowerCase();
+    if (lower.contains('datum') ||
+        lower.contains('date') ||
+        lower.contains('geburtstag') ||
+        lower == 'tag') {
+      return 'DATUM';
+    }
+    if (lower.contains('bool') ||
+        lower.startsWith('is_') ||
+        lower.startsWith('ist_') ||
+        lower.startsWith('has_') ||
+        lower.startsWith('hat_')) {
+      return 'BOOLEAN';
+    }
+    return sqlType;
+  }
+
+  /// App type of EVERY column of a table (column name -> type), in
+  /// column order: the recorded type if there is one, otherwise the
+  /// guess from [guessAppType].
+  Map<String, String> appTypesFor(String table) {
+    final info = database.select('PRAGMA table_info(${quoteIdentifier(table)})');
+    final recorded = columnTypesFor(table);
+    final result = <String, String>{};
+    for (final c in info) {
+      final name = c['name'] as String;
+      final declared = ((c['type'] as String?) ?? '').trim().toUpperCase();
+      result[name] =
+          recorded[name] ?? guessAppType(name, declared.isEmpty ? 'TEXT' : declared);
+    }
+    return result;
+  }
+
   /// Moves the recorded column types along when a table is renamed.
   void renameTableTypes(String oldName, String newName) {
     try {
@@ -196,7 +233,17 @@ class DbService {
       final encrypted = password != null && password.isNotEmpty;
       if (encrypted) {
         db.execute("PRAGMA key = '${_escape(password)}'");
-        db.select('PRAGMA cipher_version'); // verify encryption works
+        // Verify that SQLCipher is really linked in. With plain SQLite
+        // PRAGMA key is silently ignored and the file would NOT be
+        // encrypted although the user typed a password.
+        final version = db.select('PRAGMA cipher_version');
+        if (version.isEmpty ||
+            (version.first.values.first as String?)?.isNotEmpty != true) {
+          throw StateError(
+            'Verschlüsselung nicht verfügbar: SQLCipher ist nicht '
+            'eingebunden (siehe hooks/user_defines in der pubspec.yaml).',
+          );
+        }
       }
 
       // --- your initial schema goes here ---

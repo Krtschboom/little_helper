@@ -3,9 +3,7 @@
 Copy the contents of `lib/` over your project's `lib/` folder
 (keep the same sub-folders: screens, services, widgets).
 
-BEFORE the first run, add this dependency (needed for the German date picker):
-
-    flutter pub add flutter_localizations --sdk=flutter
+(flutter_localizations is already in your pubspec.yaml - nothing to add.)
 
 ## New file
 - lib/widgets/password_dialog.dart - ONE password dialog + ONE
@@ -45,3 +43,19 @@ BEFORE the first run, add this dependency (needed for the German date picker):
 - Settings: ListenableBuilder + SegmentedButton for light/dark/system.
 - Dialogs with text fields are their own widgets (controllers are
   disposed safely).
+
+## Round 2
+- NEW: +/- counter columns. When you pick INTEGER (new table, new column
+  in the column editor, or CSV import) a checkbox "Plus-/Minus-Buttons in
+  der Tabelle" appears. Such a column is shown as  [-]  value  [+]  in the
+  table editor; tapping the value still lets you type a number.
+  In the column editor you can also switch the buttons on/off for
+  EXISTING integer columns. Stored as app type 'COUNTER' (SQLite: INTEGER).
+  The +/- buttons update only that row and do not re-sort the list.
+- Inventory dialogs (new table, column editor, rename table, CSV import)
+  are now their own widgets that dispose their controllers safely.
+- Fixed: removing a column in the "new table" dialog could show the wrong
+  type in the dropdowns (rows now have keys).
+- Column editor is all-or-nothing now (one transaction).
+- db_service.create(): with a password it now checks that SQLCipher is
+  really linked in (PRAGMA cipher_version) and refuses otherwise.

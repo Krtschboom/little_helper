@@ -3,88 +3,90 @@ import 'package:flutter/material.dart';
 import '../services/app_settings.dart';
 
 /// Settings page: app colors, light/dark mode and more.
-class SettingsScreen extends StatefulWidget {
+class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
   @override
-  State<SettingsScreen> createState() => _SettingsScreenState();
-}
-
-class _SettingsScreenState extends State<SettingsScreen> {
-  @override
   Widget build(BuildContext context) {
-    final settings = AppSettings.instance;
-    // What the OS currently requests — shown under "Systemeinstellung"
-    // so switching between System and Dunkel/Hell is never confusing.
+    // What the OS currently requests - shown next to "System" so
+    // switching between System and Hell/Dunkel is never confusing.
     final systemIsDark =
         MediaQuery.platformBrightnessOf(context) == Brightness.dark;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Einstellungen')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Text('Farbe', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 4),
-          Text(
-            'Bestimmt die Grundfarbe der App (Buttons, Akzente etc.).',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
+      // ListenableBuilder rebuilds the whole list whenever a setting
+      // changes, so the selected color and mode are always up to date.
+      body: ListenableBuilder(
+        listenable: AppSettings.instance,
+        builder: (context, _) {
+          final settings = AppSettings.instance;
+          return ListView(
+            padding: const EdgeInsets.all(16),
             children: [
-              for (final option in settingsPalette)
-                _ColorSwatch(
-                  option: option,
-                  selected: settings.seedColor.toARGB32() == option.color.toARGB32(),
-                  onTap: () => settings.setSeedColor(option.color),
-                ),
-            ],
-          ),
-          const Divider(height: 32),
-          Text(
-            'Erscheinungsbild',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          // AnimatedBuilder rebuilds the list itself whenever the
-          // settings change, so the selected option is always shown
-          // immediately, independent of the rest of the app.
-          AnimatedBuilder(
-            animation: AppSettings.instance,
-            builder: (context, _) {
-              final settings = AppSettings.instance;
-              return Column(
+              Text('Farbe', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 4),
+              Text(
+                'Bestimmt die Grundfarbe der App (Buttons, Akzente etc.).',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
                 children: [
-                  for (final mode in ThemeMode.values)
-                    ListTile(
-                      leading: Icon(
-                        settings.themeMode == mode
-                            ? Icons.radio_button_checked
-                            : Icons.radio_button_off,
-                      ),
-                      title: Text(switch (mode) {
-                        ThemeMode.system => 'Systemeinstellung',
-                        ThemeMode.light => 'Hell',
-                        ThemeMode.dark => 'Dunkel',
-                      }),
-                      subtitle: mode == ThemeMode.system
-                          ? Text(
-                              'Folgt dem Betriebssystem '
-                              '(derzeit: ${systemIsDark ? 'dunkel' : 'hell'})',
-                            )
-                          : null,
-                      onTap: () => settings.setThemeMode(mode),
+                  for (final option in settingsPalette)
+                    _ColorSwatch(
+                      option: option,
+                      selected: settings.seedColor.toARGB32() ==
+                          option.color.toARGB32(),
+                      onTap: () => settings.setSeedColor(option.color),
                     ),
                 ],
-              );
-            },
-          ),
-          const Divider(height: 32),
-          // Room for further settings:
-          // ListTile(leading: Icon(Icons.info), title: Text('Über die App')),
-        ],
+              ),
+              const Divider(height: 32),
+              Text(
+                'Erscheinungsbild',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 12),
+              SegmentedButton<ThemeMode>(
+                segments: const [
+                  ButtonSegment<ThemeMode>(
+                    value: ThemeMode.system,
+                    icon: Icon(Icons.brightness_auto),
+                    label: Text('System'),
+                  ),
+                  ButtonSegment<ThemeMode>(
+                    value: ThemeMode.light,
+                    icon: Icon(Icons.light_mode),
+                    label: Text('Hell'),
+                  ),
+                  ButtonSegment<ThemeMode>(
+                    value: ThemeMode.dark,
+                    icon: Icon(Icons.dark_mode),
+                    label: Text('Dunkel'),
+                  ),
+                ],
+                selected: {settings.themeMode},
+                onSelectionChanged: (selection) =>
+                    settings.setThemeMode(selection.first),
+              ),
+              if (settings.themeMode == ThemeMode.system)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'Folgt dem Betriebssystem '
+                    '(derzeit: ${systemIsDark ? 'dunkel' : 'hell'})',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              const Divider(height: 32),
+              // Room for further settings:
+              // ListTile(leading: Icon(Icons.info), title: Text('Über die App')),
+            ],
+          );
+        },
       ),
     );
   }

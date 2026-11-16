@@ -39,6 +39,11 @@ class DbService {
 
   static bool databaseFileExists(String path) => File(path).existsSync();
 
+  /// Quotes a table or column name for use inside SQL. A `"` inside
+  /// the name is doubled, so odd names cannot break the statement.
+  static String quoteIdentifier(String name) =>
+      '"${name.replaceAll('"', '""')}"';
+
   // --- App column type metadata -------------------------------
   // SQLite has no native DATUM/BOOLEAN types, so the app remembers
   // which display type each column was given at table creation time.
@@ -65,7 +70,6 @@ class DbService {
 
   void deleteColumnType(String table, String column) {
     try {
-      ensureAppTypesTable();
       database.execute(
         'DELETE FROM _app_column_types '
         'WHERE table_name = ? AND column_name = ?',
@@ -80,7 +84,6 @@ class DbService {
   /// or null if nothing was recorded.
   String? columnType(String table, String column) {
     try {
-      ensureAppTypesTable();
       final result = database.select(
         'SELECT type FROM _app_column_types '
         'WHERE table_name = ? AND column_name = ?',
@@ -92,6 +95,47 @@ class DbService {
     }
   }
 
+  /// All recorded app types of one table in a single query
+  /// (column name -> type). Empty if nothing was recorded.
+  Map<String, String> columnTypesFor(String table) {
+    try {
+      final result = database.select(
+        'SELECT column_name, type FROM _app_column_types '
+        'WHERE table_name = ?',
+        [table],
+      );
+      return {
+        for (final r in result) r['column_name'] as String: r['type'] as String,
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Moves the recorded column types along when a table is renamed.
+  void renameTableTypes(String oldName, String newName) {
+    try {
+      database.execute(
+        'UPDATE _app_column_types SET table_name = ? WHERE table_name = ?',
+        [newName, oldName],
+      );
+    } catch (_) {
+      // Metadata is optional; ignore errors.
+    }
+  }
+
+  /// Removes the recorded column types of a dropped table.
+  void deleteTableTypes(String table) {
+    try {
+      database.execute(
+        'DELETE FROM _app_column_types WHERE table_name = ?',
+        [table],
+      );
+    } catch (_) {
+      // Metadata is optional; ignore errors.
+    }
+  }
+
   /// Escapes a password for use inside a PRAGMA string literal.
   static String _escape(String s) => s.replaceAll("'", "''");
 
@@ -99,6 +143,8 @@ class DbService {
   /// If [password] is null/empty the file is opened unencrypted.
   /// If [remember] is true, the password is kept in memory for this
   /// app session so the database can be reopened without asking again.
+  ///
+  /// Throws if the file cannot be read with the given password.
   Future<void> open(String path,
       {String? password, bool remember = false}) async {
     await close();
@@ -106,22 +152,14 @@ class DbService {
     try {
       if (password != null && password.isNotEmpty) {
         db.execute("PRAGMA key = '${_escape(password)}'");
-        db.select('SELECT count(*) FROM sqlite_master'); // throws on wrong key
-      } else {
-        db.select('SELECT count(*) FROM sqlite_master');
       }
-
-      // if (password != null && password.isNotEmpty) {
-      //   db.execute("PRAGMA key = '${_escape(password)}'");
-      //   // Throws SqliteException when the key is wrong.
-      //   db.select('PRAGMA cipher_version');
-      // } else {
-      //   // Plain file: accessing the schema throws if it is actually
-      //   // encrypted ("file is not a database").
-      //   db.select('PRAGMA schema_version');
-      // }
+      // Actually read from the file. This is what fails with
+      // "file is not a database" when the key is wrong (or missing
+      // for an encrypted file). PRAGMA cipher_version would NOT fail,
+      // because it never touches the file.
+      db.select('SELECT count(*) FROM sqlite_master');
     } catch (e) {
-      db.close();
+      db.dispose();
       rethrow;
     }
     _db = db;
@@ -130,19 +168,27 @@ class DbService {
     if (remember && _password != null) {
       _rememberedPassword = _password;
     }
+    _tryEnsureAppTypesTable();
   }
 
-  /// Creates a new database at [path] (encrypted if [password] is
-  /// given, plain otherwise) and initializes the base schema.
+  /// Creates a new database in [directory] (encrypted if [password]
+  /// is given, plain otherwise) and initializes the base schema.
+  /// [fileName] gets a ".db" extension if it has none.
   Future<void> create({
     required String directory,
     required String fileName,
     String? password,
   }) async {
     await close();
-    final path = p.join(directory, fileName);
+    var name = fileName.trim();
+    if (name.isEmpty || p.basename(name) != name) {
+      throw StateError('Ungültiger Dateiname: $fileName');
+    }
+    if (p.extension(name).isEmpty) name = '$name.db';
+
+    final path = p.join(directory, name);
     if (File(path).existsSync()) {
-      throw StateError('Datei existiert bereits: $fileName');
+      throw StateError('Datei existiert bereits: $name');
     }
 
     final db = sqlite3.open(path);
@@ -150,7 +196,17 @@ class DbService {
       final encrypted = password != null && password.isNotEmpty;
       if (encrypted) {
         db.execute("PRAGMA key = '${_escape(password)}'");
-        db.select('PRAGMA cipher_version'); // verify encryption works
+        // Verify that SQLCipher is really linked in. With plain SQLite
+        // PRAGMA key is silently ignored and the file would NOT be
+        // encrypted although the user typed a password.
+        final version = db.select('PRAGMA cipher_version');
+        if (version.isEmpty ||
+            (version.first.values.first as String?)?.isNotEmpty != true) {
+          throw StateError(
+            'Verschlüsselung nicht verfügbar: SQLCipher ist nicht '
+            'eingebunden (siehe hooks/user_defines in der pubspec.yaml).',
+          );
+        }
       }
 
       // --- your initial schema goes here ---
@@ -163,17 +219,27 @@ class DbService {
         )
       ''');
     } catch (e) {
-      db.close();
+      db.dispose();
       File(path).deleteSync(); // clean up broken file
       rethrow;
     }
     _db = db;
     _path = path;
     _password = (password != null && password.isNotEmpty) ? password : null;
+    _tryEnsureAppTypesTable();
+  }
+
+  /// Creates the metadata table once per open database, so the
+  /// getters above do not have to do it on every call. Failing (e.g.
+  /// read-only file) is fine: metadata is optional.
+  void _tryEnsureAppTypesTable() {
+    try {
+      ensureAppTypesTable();
+    } catch (_) {}
   }
 
   Future<void> close() async {
-    _db?.close();
+    _db?.dispose();
     _db = null;
     _path = null;
     _password = null; // wipe the open-database password

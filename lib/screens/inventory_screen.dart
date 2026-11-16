@@ -5,11 +5,36 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:sqlite3/sqlite3.dart' show ResultSet;
 
+import '../services/checklist_service.dart';
 import '../services/db_service.dart';
+import '../widgets/text_prompt_dialog.dart';
 import 'table_editor_screen.dart';
 
 /// Quotes a table/column name for SQL (doubles any `"` inside it).
 String _q(String name) => DbService.quoteIdentifier(name);
+
+/// App-level column types -> what SQLite really stores:
+///   DATUM   -> TEXT    (ISO date)
+///   BOOLEAN -> INTEGER (0/1)
+///   COUNTER -> INTEGER (shown with [-] value [+] buttons in the table)
+const _sqliteTypes = {
+  'DATUM': 'TEXT',
+  'BOOLEAN': 'INTEGER',
+  'COUNTER': 'INTEGER',
+};
+
+/// The types the user can pick in the dropdowns. (COUNTER is not in
+/// the list: it is "INTEGER" + the +/- checkbox.)
+const List<DropdownMenuItem<String>> _typeItems = [
+  DropdownMenuItem(value: 'TEXT', child: Text('TEXT')),
+  DropdownMenuItem(value: 'INTEGER', child: Text('INTEGER')),
+  DropdownMenuItem(value: 'REAL', child: Text('REAL')),
+  DropdownMenuItem(value: 'DATUM', child: Text('DATUM')),
+  DropdownMenuItem(value: 'BOOLEAN', child: Text('BOOLEAN')),
+];
+
+typedef _ColumnDef = ({String name, String type});
+typedef _TableDef = ({String name, String sql, List<_ColumnDef> columns});
 
 /// Lists all tables of the database and lets the user create new ones.
 class InventoryScreen extends StatefulWidget {
@@ -67,15 +92,19 @@ class _InventoryScreenState extends State<InventoryScreen> {
         ),
       ),
     );
-    if (choice == null) return;
+    if (choice == null || !mounted) return;
 
     if (choice == 'csv') {
       await _importCsv();
       return;
     }
 
-    final definition = await _promptNewTable();
-    if (definition == null) return;
+    final definition = await showDialog<_TableDef>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _NewTableDialog(),
+    );
+    if (definition == null || !mounted) return;
 
     try {
       DbService.instance.database.execute(definition.sql);
@@ -104,331 +133,83 @@ class _InventoryScreenState extends State<InventoryScreen> {
     }
   }
 
-  /// Builds the CREATE TABLE statement from user input.
-  Future<({String name, String sql, List<({String name, String type})> columns})?>
-      _promptNewTable() {
-    final nameCtrl = TextEditingController();
-    final columns = <_ColumnSpec>[
-      _ColumnSpec(),
-    ];
-
-    return showDialog<
-        ({String name, String sql, List<({String name, String type})> columns})>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) => AlertDialog(
-            title: const Text('Neue Tabelle erstellen'),
-            content: SizedBox(
-              width: 420,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: nameCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Tabellenname',
-                      hintText: 'z.B. items',
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Flexible(
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: columns.length,
-                      itemBuilder: (context, i) {
-                        final col = columns[i];
-                        return Row(
-                          children: [
-                            Expanded(
-                              flex: 3,
-                              child: TextField(
-                                controller: col.nameCtrl,
-                                decoration: InputDecoration(
-                                  labelText: 'Spalte ${i + 1}',
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              flex: 2,
-                              child: DropdownButtonFormField<String>(
-                                isExpanded: true,
-                                initialValue: col.type,
-                                items: const [
-                                  DropdownMenuItem(
-                                    value: 'TEXT',
-                                    child: Text('TEXT'),
-                                  ),
-                                  DropdownMenuItem(
-                                    value: 'INTEGER',
-                                    child: Text('INTEGER'),
-                                  ),
-                                  DropdownMenuItem(
-                                    value: 'REAL',
-                                    child: Text('REAL'),
-                                  ),
-                                  DropdownMenuItem(
-                                    value: 'DATUM',
-                                    child: Text('DATUM'),
-                                  ),
-                                  DropdownMenuItem(
-                                    value: 'BOOLEAN',
-                                    child: Text('BOOLEAN'),
-                                  ),
-                                ],
-                                onChanged: (v) =>
-                                    setDialogState(() => col.type = v!),
-                              ),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.close),
-                              onPressed: columns.length > 1
-                                  ? () => setDialogState(
-                                      () => columns.removeAt(i))
-                                  : null,
-                            ),
-                          ],
-                        );
-                      },
-                    ),
-                  ),
-                  TextButton.icon(
-                    onPressed: () =>
-                        setDialogState(() => columns.add(_ColumnSpec())),
-                    icon: const Icon(Icons.add),
-                    label: const Text('Spalte hinzufügen'),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Abbrechen'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  final name = nameCtrl.text.trim();
-                  if (name.isEmpty) return;
-                  // DATUM and BOOLEAN have no native SQLite types:
-                  // dates are stored as TEXT (ISO format), booleans as
-                  // INTEGER (0/1).
-                  const sqliteTypes = {
-                    'DATUM': 'TEXT',
-                    'BOOLEAN': 'INTEGER',
-                  };
-                  final colDefs = columns
-                      .where((c) => c.nameCtrl.text.trim().isNotEmpty)
-                      .map((c) =>
-                          '${_q(c.nameCtrl.text.trim())} '
-                          '${sqliteTypes[c.type] ?? c.type}')
-                      .toList();
-                  if (colDefs.isEmpty) return;
-                  Navigator.pop(
-                    context,
-                    (
-                      name: name,
-                      sql: 'CREATE TABLE ${_q(name)} (${colDefs.join(', ')})',
-                      columns: columns
-                          .where((c) => c.nameCtrl.text.trim().isNotEmpty)
-                          .map((c) => (
-                                name: c.nameCtrl.text.trim(),
-                                type: c.type,
-                              ))
-                          .toList(),
-                    ),
-                  );
-                },
-                child: const Text('Erstellen'),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
   /// Column editor: rename, delete and add columns of a table.
   /// Column TYPES of existing columns cannot be changed (SQLite
-  /// limitation), but new columns can be TEXT, INTEGER, REAL,
-  /// DATUM or BOOLEAN.
+  /// limitation), but new columns can be TEXT, INTEGER (optionally with
+  /// +/- buttons), REAL, DATUM or BOOLEAN. For existing integer columns
+  /// the +/- buttons can be switched on and off.
   Future<void> _editColumns(String table) async {
     final db = DbService.instance.database;
-    final columns = (db.select('PRAGMA table_info(${_q(table)})'))
-        .map((c) => c['name'] as String)
-        .toList();
-
-    final renameCtrl = <String, TextEditingController>{
-      for (final c in columns) c: TextEditingController(text: c),
-    };
-    final deleted = <String>{};
-    final newColumns = <_ColumnSpec>[];
-
-    const sqliteTypes = {'DATUM': 'TEXT', 'BOOLEAN': 'INTEGER'};
-    const typeItems = [
-      DropdownMenuItem(value: 'TEXT', child: Text('TEXT')),
-      DropdownMenuItem(value: 'INTEGER', child: Text('INTEGER')),
-      DropdownMenuItem(value: 'REAL', child: Text('REAL')),
-      DropdownMenuItem(value: 'DATUM', child: Text('DATUM')),
-      DropdownMenuItem(value: 'BOOLEAN', child: Text('BOOLEAN')),
+    final recorded = DbService.instance.columnTypesFor(table);
+    final existing = <_ExistingColumn>[
+      for (final c in db.select('PRAGMA table_info(${_q(table)})'))
+        _existingColumn(
+          c['name'] as String,
+          (c['type'] as String?) ?? '',
+          recorded,
+        ),
     ];
 
-    final confirmed = await showDialog<bool>(
+    final edits = await showDialog<_ColumnEdits>(
       context: context,
       barrierDismissible: false,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: Text('Spalten von "$table" bearbeiten'),
-          content: SizedBox(
-            width: 400,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Bestehende Spalten:'),
-                  for (final c in columns)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: renameCtrl[c],
-                              enabled: !deleted.contains(c),
-                              decoration: InputDecoration(
-                                labelText: c,
-                                labelStyle: deleted.contains(c)
-                                    ? const TextStyle(
-                                        decoration:
-                                            TextDecoration.lineThrough)
-                                    : null,
-                              ),
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: deleted.contains(c)
-                                ? 'Löschen rückgängig'
-                                : 'Spalte löschen',
-                            icon: Icon(deleted.contains(c)
-                                ? Icons.undo
-                                : Icons.delete_outline),
-                            onPressed: () => setDialogState(() {
-                              deleted.contains(c)
-                                  ? deleted.remove(c)
-                                  : deleted.add(c);
-                            }),
-                          ),
-                        ],
-                      ),
-                    ),
-                  const Divider(),
-                  const Text('Neue Spalten:'),
-                  for (final (i, col) in newColumns.indexed)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            flex: 3,
-                            child: TextField(
-                              controller: col.nameCtrl,
-                              decoration: InputDecoration(
-                                labelText: 'Neue Spalte ${i + 1}',
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            flex: 2,
-                            child: DropdownButtonFormField<String>(
-                              isExpanded: true,
-                              initialValue: col.type,
-                              items: typeItems,
-                              onChanged: (v) =>
-                                  setDialogState(() => col.type = v!),
-                            ),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.close),
-                            onPressed: () => setDialogState(
-                                () => newColumns.remove(col)),
-                          ),
-                        ],
-                      ),
-                    ),
-                  TextButton.icon(
-                    onPressed: () => setDialogState(
-                        () => newColumns.add(_ColumnSpec())),
-                    icon: const Icon(Icons.add),
-                    label: const Text('Spalte hinzufügen'),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Abbrechen'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Speichern'),
-            ),
-          ],
-        ),
-      ),
+      builder: (_) => _EditColumnsDialog(table: table, columns: existing),
     );
-
-    if (confirmed != true) {
-      for (var c in renameCtrl.values) {
-        c.dispose();
-      }
-      for (var c in newColumns) {
-        c.nameCtrl.dispose();
-      }
-      return;
-    }
+    if (edits == null || !mounted) return;
 
     try {
-      for (final c in columns) {
-        if (deleted.contains(c)) {
-          db.execute('ALTER TABLE ${_q(table)} DROP COLUMN ${_q(c)}');
-          DbService.instance.deleteColumnType(table, c);
-          continue;
-        }
-        final renamed = renameCtrl[c]!.text.trim();
-        if (renamed.isNotEmpty && renamed != c) {
-          db.execute(
-            'ALTER TABLE ${_q(table)} RENAME COLUMN ${_q(c)} TO ${_q(renamed)}',
-          );
-          // Move the recorded type along with the rename.
-          final type = DbService.instance.columnType(table, c);
-          if (type != null) {
+      // All-or-nothing: if one change fails, none of them is applied.
+      db.execute('BEGIN');
+      try {
+        for (final column in existing) {
+          final c = column.name;
+          if (edits.deleted.contains(c)) {
+            db.execute('ALTER TABLE ${_q(table)} DROP COLUMN ${_q(c)}');
             DbService.instance.deleteColumnType(table, c);
-            DbService.instance.recordColumnType(table, renamed, type);
+            continue;
+          }
+          var name = c;
+          final renamed = edits.renames[c];
+          if (renamed != null) {
+            db.execute(
+              'ALTER TABLE ${_q(table)} RENAME COLUMN ${_q(c)} TO ${_q(renamed)}',
+            );
+            // Move the recorded type along with the rename.
+            final type = DbService.instance.columnType(table, c);
+            if (type != null) {
+              DbService.instance.deleteColumnType(table, c);
+              DbService.instance.recordColumnType(table, renamed, type);
+            }
+            name = renamed;
+          }
+          final counter = edits.counters[c];
+          if (counter != null) {
+            DbService.instance.recordColumnType(
+              table,
+              name,
+              counter ? 'COUNTER' : 'INTEGER',
+            );
           }
         }
-      }
-      for (final col in newColumns) {
-        final name = col.nameCtrl.text.trim();
-        if (name.isEmpty) continue;
-        db.execute(
-          'ALTER TABLE ${_q(table)} ADD COLUMN ${_q(name)} '
-          '${sqliteTypes[col.type] ?? col.type}',
-        );
-        DbService.instance.recordColumnType(table, name, col.type);
+        for (final col in edits.newColumns) {
+          db.execute(
+            'ALTER TABLE ${_q(table)} ADD COLUMN ${_q(col.name)} '
+            '${_sqliteTypes[col.type] ?? col.type}',
+          );
+          DbService.instance.recordColumnType(table, col.name, col.type);
+        }
+        db.execute('COMMIT');
+      } catch (_) {
+        db.execute('ROLLBACK');
+        rethrow;
       }
 
-      for (var c in renameCtrl.values) {
-        c.dispose();
+      // Rule checklists that use a renamed column follow the new name
+      // (after COMMIT, so a rollback can never leave them out of sync).
+      for (final e in edits.renames.entries) {
+        ChecklistService.onColumnRenamed(table, e.key, e.value);
       }
-      for (var c in newColumns) {
-        c.nameCtrl.dispose();
-      }
+
       _loadTables();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -442,36 +223,24 @@ class _InventoryScreenState extends State<InventoryScreen> {
 
   /// Renames a table via ALTER TABLE ... RENAME TO.
   Future<void> _renameTable(String table) async {
-    final controller = TextEditingController(text: table);
-    final newName = await showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: Text('Tabelle "$table" umbenennen'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: 'Neuer Name'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Abbrechen'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('Umbenennen'),
-          ),
-        ],
-      ),
+    final newName = await showTextPrompt(
+      context,
+      title: 'Tabelle "$table" umbenennen',
+      label: 'Neuer Name',
+      initial: table,
+      confirmLabel: 'Umbenennen',
     );
-    if (newName == null || newName.isEmpty || newName == table) return;
+    if (newName == null || newName.isEmpty || newName == table || !mounted) {
+      return;
+    }
 
     try {
       DbService.instance.database
           .execute('ALTER TABLE ${_q(table)} RENAME TO ${_q(newName)}');
-      // Move the recorded DATUM/BOOLEAN types to the new table name.
+      // Move the recorded DATUM/BOOLEAN/COUNTER types to the new name.
       DbService.instance.renameTableTypes(table, newName);
+      // Rule checklists that use this table follow the new name.
+      ChecklistService.onTableRenamed(table, newName);
       _loadTables();
     } catch (e) {
       _showError(e);
@@ -513,7 +282,17 @@ class _InventoryScreenState extends State<InventoryScreen> {
       types.add(_guessType(values));
     }
 
-    final definition = await _promptCsvImport(file.name, header, types);
+    if (!mounted) return;
+    final definition = await showModalBottomSheet<_TableDef>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _CsvImportSheet(
+        fileName: file.name,
+        header: header,
+        guessedTypes: types,
+      ),
+    );
     if (definition == null) return;
 
     try {
@@ -568,159 +347,6 @@ class _InventoryScreenState extends State<InventoryScreen> {
     }
   }
 
-  /// Import dialog: table name plus one type dropdown per CSV column,
-  /// pre-filled with the auto-detected type.
-  Future<({String name, String sql, List<({String name, String type})> columns})?>
-      _promptCsvImport(
-    String fileName,
-    List<String> header,
-    List<String> guessedTypes,
-  ) {
-    final nameCtrl = TextEditingController();
-    // Suggest the file name (without extension) as table name.
-    final baseName = fileName.replaceAll(RegExp(r'\.csv$', caseSensitive: false), '').trim();
-    nameCtrl.text = baseName;
-
-    final types = <String>[...guessedTypes];
-    final usedNames = <String>{};
-    // Make duplicate/empty column names unique.
-    final columnNames = <String>[];
-    for (final h in header) {
-      var name = h.trim();
-      if (name.isEmpty) name = 'Spalte';
-      var candidate = name;
-      var n = 2;
-      while (usedNames.contains(candidate)) {
-        candidate = '$name $n';
-        n++;
-      }
-      usedNames.add(candidate);
-      columnNames.add(candidate);
-    }
-
-    return showModalBottomSheet<
-        ({String name, String sql, List<({String name, String type})> columns})>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setSheetState) => Padding(
-          padding: EdgeInsets.only(
-            left: 24,
-            right: 24,
-            top: 8,
-            bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                'CSV importieren',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'Spaltennamen wurden aus der Datei übernommen – '
-                'Typen kannst du anpassen.',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: nameCtrl,
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: 'Tabellenname',
-                ),
-              ),
-              const SizedBox(height: 12),
-              Flexible(
-                child: ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: header.length,
-                  itemBuilder: (context, i) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          flex: 3,
-                          child: Text(
-                            columnNames[i],
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          flex: 2,
-                          child: DropdownButtonFormField<String>(
-                            isExpanded: true,
-                            initialValue: types[i],
-                            items: const [
-                              DropdownMenuItem(
-                                value: 'TEXT',
-                                child: Text('TEXT'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'INTEGER',
-                                child: Text('INTEGER'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'REAL',
-                                child: Text('REAL'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'DATUM',
-                                child: Text('DATUM'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'BOOLEAN',
-                                child: Text('BOOLEAN'),
-                              ),
-                            ],
-                            onChanged: (v) =>
-                                setSheetState(() => types[i] = v!),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: () {
-                  final name = nameCtrl.text.trim();
-                  if (name.isEmpty) return;
-                  const sqliteTypes = {
-                    'DATUM': 'TEXT',
-                    'BOOLEAN': 'INTEGER',
-                  };
-                  final colDefs = [
-                    for (var i = 0; i < columnNames.length; i++)
-                      '${_q(columnNames[i])} ${sqliteTypes[types[i]] ?? types[i]}',
-                  ];
-                  Navigator.pop(
-                    context,
-                    (
-                      name: name,
-                      sql: 'CREATE TABLE ${_q(name)} (${colDefs.join(', ')})',
-                      columns: [
-                        for (var i = 0; i < columnNames.length; i++)
-                          (name: columnNames[i], type: types[i]),
-                      ],
-                    ),
-                  );
-                },
-                icon: const Icon(Icons.check),
-                label: const Text('Importieren'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   /// Guesses the column type from all non-empty values of a column.
   String _guessType(List<String> values) {
     final nonEmpty =
@@ -748,6 +374,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
     if (raw.isEmpty) return null;
     switch (type) {
       case 'INTEGER':
+      case 'COUNTER':
         return int.tryParse(raw) ?? int.tryParse(raw.split('.').first);
       case 'REAL':
         return double.tryParse(raw.replaceAll(',', '.'));
@@ -898,6 +525,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
     try {
       DbService.instance.database.execute('DROP TABLE ${_q(table)}');
       DbService.instance.deleteTableTypes(table);
+      ChecklistService.onTableDropped(table);
       _loadTables();
     } catch (e) {
       _showError(e);
@@ -987,7 +615,617 @@ class _InventoryScreenState extends State<InventoryScreen> {
   }
 }
 
+// ---------------------------------------------------------------
+// Dialogs and small widgets. Every dialog that has text fields is
+// its own StatefulWidget: it creates its TextEditingControllers and
+// disposes them in dispose() - the only safe moment, because by then
+// the dialog is completely gone (disposing right after showDialog()
+// returns can crash in debug mode while the closing animation runs).
+// ---------------------------------------------------------------
+
+/// A column the user is defining (new table or new column).
 class _ColumnSpec {
-  final TextEditingController nameCtrl = TextEditingController();
-  String type = 'TEXT';
+  _ColumnSpec() : nameCtrl = TextEditingController();
+
+  final TextEditingController nameCtrl;
+
+  /// TEXT, INTEGER, REAL, DATUM or BOOLEAN (what the dropdown shows).
+  String baseType = 'TEXT';
+
+  /// "+/- buttons" checkbox; only meaningful for INTEGER.
+  bool counter = false;
+
+  String get name => nameCtrl.text.trim();
+
+  /// The type the app records: INTEGER + checkbox = COUNTER.
+  String get appType =>
+      (baseType == 'INTEGER' && counter) ? 'COUNTER' : baseType;
+
+  /// The type SQLite gets in CREATE/ALTER TABLE.
+  String get sqlType => _sqliteTypes[appType] ?? appType;
+
+  void dispose() => nameCtrl.dispose();
+}
+
+/// A column that already exists in a table (for the column editor).
+class _ExistingColumn {
+  const _ExistingColumn({
+    required this.name,
+    required this.canCounter,
+    required this.counter,
+  });
+
+  final String name;
+
+  /// True for integer columns: only they can have +/- buttons.
+  final bool canCounter;
+
+  /// True if the +/- buttons are currently switched on.
+  final bool counter;
+}
+
+_ExistingColumn _existingColumn(
+  String name,
+  String sqlType,
+  Map<String, String> recorded,
+) {
+  final app = recorded[name];
+  final canCounter = app == null
+      ? sqlType.toUpperCase().contains('INT')
+      : (app == 'INTEGER' || app == 'COUNTER');
+  return _ExistingColumn(
+    name: name,
+    canCounter: canCounter,
+    counter: app == 'COUNTER',
+  );
+}
+
+/// What the column editor dialog hands back.
+class _ColumnEdits {
+  const _ColumnEdits({
+    required this.deleted,
+    required this.renames,
+    required this.counters,
+    required this.newColumns,
+  });
+
+  /// Existing columns to drop.
+  final Set<String> deleted;
+
+  /// Old name -> new name.
+  final Map<String, String> renames;
+
+  /// Existing column -> +/- buttons switched on (true) or off (false).
+  /// Only contains columns where the setting was changed.
+  final Map<String, bool> counters;
+
+  /// Columns to add (name + app type).
+  final List<_ColumnDef> newColumns;
+}
+
+/// Type dropdown used in all column dialogs.
+class _TypeDropdown extends StatelessWidget {
+  const _TypeDropdown({required this.type, required this.onChanged});
+
+  final String type;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      isExpanded: true,
+      initialValue: type,
+      items: _typeItems,
+      onChanged: (v) {
+        if (v != null) onChanged(v);
+      },
+    );
+  }
+}
+
+/// The "+/- buttons" checkbox shown below INTEGER columns.
+class _CounterCheckbox extends StatelessWidget {
+  const _CounterCheckbox({required this.value, required this.onChanged});
+
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return CheckboxListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      controlAffinity: ListTileControlAffinity.leading,
+      value: value,
+      onChanged: (v) => onChanged(v ?? false),
+      title: const Text('Plus-/Minus-Buttons in der Tabelle'),
+      subtitle: const Text('Wert direkt um 1 erhöhen oder verringern'),
+    );
+  }
+}
+
+/// "New table" dialog: table name plus a list of columns.
+class _NewTableDialog extends StatefulWidget {
+  const _NewTableDialog();
+
+  @override
+  State<_NewTableDialog> createState() => _NewTableDialogState();
+}
+
+class _NewTableDialogState extends State<_NewTableDialog> {
+  final _nameCtrl = TextEditingController();
+  final List<_ColumnSpec> _columns = [_ColumnSpec()];
+
+  /// Removed columns: disposed together with the dialog (not earlier,
+  /// their text fields are still on screen until the next rebuild).
+  final List<_ColumnSpec> _retired = [];
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    for (final c in _columns) {
+      c.dispose();
+    }
+    for (final c in _retired) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  void _create() {
+    final name = _nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    final specs = _columns.where((c) => c.name.isNotEmpty).toList();
+    if (specs.isEmpty) return;
+
+    // DATUM, BOOLEAN and COUNTER have no native SQLite types: dates
+    // are stored as TEXT (ISO format), booleans and counters as INTEGER.
+    final colDefs = specs.map((c) => '${_q(c.name)} ${c.sqlType}').join(', ');
+    Navigator.pop<_TableDef>(context, (
+      name: name,
+      sql: 'CREATE TABLE ${_q(name)} ($colDefs)',
+      columns: [for (final c in specs) (name: c.name, type: c.appType)],
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Neue Tabelle erstellen'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _nameCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Tabellenname',
+                hintText: 'z.B. items',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: _columns.length,
+                itemBuilder: (context, i) {
+                  final col = _columns[i];
+                  return Column(
+                    // The key ties the dropdown's state to THIS column
+                    // (otherwise removing a column shows wrong types).
+                    key: ObjectKey(col),
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            flex: 3,
+                            child: TextField(
+                              controller: col.nameCtrl,
+                              decoration: InputDecoration(
+                                labelText: 'Spalte ${i + 1}',
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            flex: 2,
+                            child: _TypeDropdown(
+                              type: col.baseType,
+                              onChanged: (v) => setState(() {
+                                col.baseType = v;
+                                if (v != 'INTEGER') col.counter = false;
+                              }),
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close),
+                            onPressed: _columns.length > 1
+                                ? () => setState(() {
+                                      _retired.add(_columns.removeAt(i));
+                                    })
+                                : null,
+                          ),
+                        ],
+                      ),
+                      if (col.baseType == 'INTEGER')
+                        _CounterCheckbox(
+                          value: col.counter,
+                          onChanged: (v) => setState(() => col.counter = v),
+                        ),
+                    ],
+                  );
+                },
+              ),
+            ),
+            TextButton.icon(
+              onPressed: () => setState(() => _columns.add(_ColumnSpec())),
+              icon: const Icon(Icons.add),
+              label: const Text('Spalte hinzufügen'),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Abbrechen'),
+        ),
+        FilledButton(
+          onPressed: _create,
+          child: const Text('Erstellen'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Column editor dialog: rename / delete existing columns, switch
+/// +/- buttons on integer columns, add new columns.
+class _EditColumnsDialog extends StatefulWidget {
+  const _EditColumnsDialog({required this.table, required this.columns});
+
+  final String table;
+  final List<_ExistingColumn> columns;
+
+  @override
+  State<_EditColumnsDialog> createState() => _EditColumnsDialogState();
+}
+
+class _EditColumnsDialogState extends State<_EditColumnsDialog> {
+  late final Map<String, TextEditingController> _renameCtrl = {
+    for (final c in widget.columns)
+      c.name: TextEditingController(text: c.name),
+  };
+  late final Map<String, bool> _counters = {
+    for (final c in widget.columns) c.name: c.counter,
+  };
+  final Set<String> _deleted = {};
+  final List<_ColumnSpec> _newColumns = [];
+  final List<_ColumnSpec> _retired = [];
+
+  @override
+  void dispose() {
+    for (final c in _renameCtrl.values) {
+      c.dispose();
+    }
+    for (final c in _newColumns) {
+      c.dispose();
+    }
+    for (final c in _retired) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  void _save() {
+    final renames = <String, String>{};
+    final counters = <String, bool>{};
+    for (final c in widget.columns) {
+      if (_deleted.contains(c.name)) continue;
+      final newName = _renameCtrl[c.name]!.text.trim();
+      if (newName.isNotEmpty && newName != c.name) renames[c.name] = newName;
+      final counter = _counters[c.name] ?? false;
+      if (c.canCounter && counter != c.counter) counters[c.name] = counter;
+    }
+    Navigator.pop<_ColumnEdits>(
+      context,
+      _ColumnEdits(
+        deleted: {..._deleted},
+        renames: renames,
+        counters: counters,
+        newColumns: [
+          for (final c in _newColumns)
+            if (c.name.isNotEmpty) (name: c.name, type: c.appType),
+        ],
+      ),
+    );
+  }
+
+  Widget _existingRow(_ExistingColumn c) {
+    final deleted = _deleted.contains(c.name);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _renameCtrl[c.name],
+                  enabled: !deleted,
+                  decoration: InputDecoration(
+                    labelText: c.name,
+                    labelStyle: deleted
+                        ? const TextStyle(
+                            decoration: TextDecoration.lineThrough,
+                          )
+                        : null,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: deleted ? 'Löschen rückgängig' : 'Spalte löschen',
+                icon: Icon(deleted ? Icons.undo : Icons.delete_outline),
+                onPressed: () => setState(() {
+                  if (!_deleted.remove(c.name)) _deleted.add(c.name);
+                }),
+              ),
+            ],
+          ),
+          if (c.canCounter && !deleted)
+            _CounterCheckbox(
+              value: _counters[c.name] ?? false,
+              onChanged: (v) => setState(() => _counters[c.name] = v),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _newRow(int i, _ColumnSpec col) {
+    return Padding(
+      key: ObjectKey(col),
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                flex: 3,
+                child: TextField(
+                  controller: col.nameCtrl,
+                  decoration: InputDecoration(
+                    labelText: 'Neue Spalte ${i + 1}',
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                flex: 2,
+                child: _TypeDropdown(
+                  type: col.baseType,
+                  onChanged: (v) => setState(() {
+                    col.baseType = v;
+                    if (v != 'INTEGER') col.counter = false;
+                  }),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => setState(() {
+                  _newColumns.remove(col);
+                  _retired.add(col);
+                }),
+              ),
+            ],
+          ),
+          if (col.baseType == 'INTEGER')
+            _CounterCheckbox(
+              value: col.counter,
+              onChanged: (v) => setState(() => col.counter = v),
+            ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Spalten von "${widget.table}" bearbeiten'),
+      content: SizedBox(
+        width: 400,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Bestehende Spalten:'),
+              for (final c in widget.columns) _existingRow(c),
+              const Divider(),
+              const Text('Neue Spalten:'),
+              for (final (i, col) in _newColumns.indexed) _newRow(i, col),
+              TextButton.icon(
+                onPressed: () => setState(() => _newColumns.add(_ColumnSpec())),
+                icon: const Icon(Icons.add),
+                label: const Text('Spalte hinzufügen'),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Abbrechen'),
+        ),
+        FilledButton(
+          onPressed: _save,
+          child: const Text('Speichern'),
+        ),
+      ],
+    );
+  }
+}
+
+/// CSV import sheet: table name plus one type dropdown per CSV column,
+/// pre-filled with the auto-detected type.
+class _CsvImportSheet extends StatefulWidget {
+  const _CsvImportSheet({
+    required this.fileName,
+    required this.header,
+    required this.guessedTypes,
+  });
+
+  final String fileName;
+  final List<String> header;
+  final List<String> guessedTypes;
+
+  @override
+  State<_CsvImportSheet> createState() => _CsvImportSheetState();
+}
+
+class _CsvImportSheetState extends State<_CsvImportSheet> {
+  final _nameCtrl = TextEditingController();
+  late final List<String> _columnNames;
+  late final List<String> _types; // TEXT, INTEGER, REAL, DATUM, BOOLEAN
+  late final List<bool> _counters; // +/- buttons per column
+
+  @override
+  void initState() {
+    super.initState();
+    // Suggest the file name (without extension) as table name.
+    _nameCtrl.text = widget.fileName
+        .replaceAll(RegExp(r'\.csv$', caseSensitive: false), '')
+        .trim();
+
+    _types = [...widget.guessedTypes];
+    _counters = List.filled(widget.header.length, false);
+
+    // Make duplicate/empty column names unique.
+    final usedNames = <String>{};
+    final names = <String>[];
+    for (final h in widget.header) {
+      var name = h.trim();
+      if (name.isEmpty) name = 'Spalte';
+      var candidate = name;
+      var n = 2;
+      while (usedNames.contains(candidate)) {
+        candidate = '$name $n';
+        n++;
+      }
+      usedNames.add(candidate);
+      names.add(candidate);
+    }
+    _columnNames = names;
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  void _import() {
+    final name = _nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    final columns = <_ColumnDef>[
+      for (var i = 0; i < _columnNames.length; i++)
+        (
+          name: _columnNames[i],
+          type: (_types[i] == 'INTEGER' && _counters[i]) ? 'COUNTER' : _types[i],
+        ),
+    ];
+    final colDefs = columns
+        .map((c) => '${_q(c.name)} ${_sqliteTypes[c.type] ?? c.type}')
+        .join(', ');
+    Navigator.pop<_TableDef>(context, (
+      name: name,
+      sql: 'CREATE TABLE ${_q(name)} ($colDefs)',
+      columns: columns,
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 24,
+        right: 24,
+        top: 8,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'CSV importieren',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Spaltennamen wurden aus der Datei übernommen – '
+            'Typen kannst du anpassen.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _nameCtrl,
+            autofocus: true,
+            decoration: const InputDecoration(labelText: 'Tabellenname'),
+          ),
+          const SizedBox(height: 12),
+          Flexible(
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: _columnNames.length,
+              itemBuilder: (context, i) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          flex: 3,
+                          child: Text(
+                            _columnNames[i],
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          flex: 2,
+                          child: _TypeDropdown(
+                            type: _types[i],
+                            onChanged: (v) => setState(() {
+                              _types[i] = v;
+                              if (v != 'INTEGER') _counters[i] = false;
+                            }),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (_types[i] == 'INTEGER')
+                      _CounterCheckbox(
+                        value: _counters[i],
+                        onChanged: (v) => setState(() => _counters[i] = v),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: _import,
+            icon: const Icon(Icons.check),
+            label: const Text('Importieren'),
+          ),
+        ],
+      ),
+    );
+  }
 }

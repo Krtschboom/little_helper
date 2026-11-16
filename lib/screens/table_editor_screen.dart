@@ -95,7 +95,7 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
       final recorded = DbService.instance.columnTypesFor(widget.table);
       final appTypes = {
         for (final c in columns)
-          c: recorded[c] ?? _guessAppType(c, sqlTypes[c]!),
+          c: recorded[c] ?? DbService.guessAppType(c, sqlTypes[c]!),
       };
 
       final rows = [
@@ -139,27 +139,6 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
       _haystack[i] = _haystackOf(row);
       _applyView();
     });
-  }
-
-  /// App display type of a column when nothing was recorded: guess
-  /// from the column name (tables created outside the app), otherwise
-  /// the raw SQLite type.
-  String _guessAppType(String column, String sqlType) {
-    final lower = column.toLowerCase();
-    if (lower.contains('datum') ||
-        lower.contains('date') ||
-        lower.contains('geburtstag') ||
-        lower == 'tag') {
-      return 'DATUM';
-    }
-    if (lower.contains('bool') ||
-        lower.startsWith('is_') ||
-        lower.startsWith('ist_') ||
-        lower.startsWith('has_') ||
-        lower.startsWith('hat_')) {
-      return 'BOOLEAN';
-    }
-    return sqlType;
   }
 
   // --- Search and sort ----------------------------------------
@@ -304,6 +283,33 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
         [newValue, rowid],
       );
       _refreshRow(rowid);
+    } catch (e) {
+      _showError(e);
+    }
+  }
+
+  /// [-] / [+] buttons of a COUNTER column: changes the value by
+  /// [delta] (NULL counts as 0). Only this one row is updated; the
+  /// list is NOT re-sorted, so the row does not jump around while you
+  /// keep pressing the button.
+  void _stepCell(Map<String, Object?> row, String column, int delta) {
+    final rowid = row[_ridKey] as int;
+    final col = DbService.quoteIdentifier(column);
+    try {
+      _db.execute(
+        'UPDATE $_table SET $col = COALESCE($col, 0) + ? WHERE rowid = ?',
+        [delta, rowid],
+      );
+      final fresh = _db.select(
+        'SELECT $col AS v FROM $_table WHERE rowid = ?',
+        [rowid],
+      );
+      if (fresh.isEmpty) return;
+      row[column] = fresh.first['v'];
+      final i = _rows.indexOf(row);
+      setState(() {
+        if (i >= 0) _haystack[i] = _haystackOf(row);
+      });
     } catch (e) {
       _showError(e);
     }
@@ -454,25 +460,63 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
     );
   }
 
+  /// One cell. COUNTER columns show  [-]  value  [+]  (tap the value
+  /// to type a number); all other cells open the editor on tap.
+  Widget _buildCell(Map<String, Object?> row, String column) {
+    final text = row[column]?.toString() ?? 'NULL';
+
+    if (_appTypes[column] == 'COUNTER') {
+      return SizedBox(
+        width: _colWidth,
+        height: _rowHeight,
+        child: Row(
+          children: [
+            IconButton(
+              tooltip: 'Um 1 verringern',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.remove),
+              onPressed: () => _stepCell(row, column, -1),
+            ),
+            Expanded(
+              child: InkWell(
+                onTap: () => _editCell(row, column),
+                child: Center(
+                  child: Text(
+                    text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Um 1 erhöhen',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.add),
+              onPressed: () => _stepCell(row, column, 1),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return InkWell(
+      onTap: () => _editCell(row, column),
+      child: Container(
+        width: _colWidth,
+        height: _rowHeight,
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Text(text, maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
+    );
+  }
+
   Widget _buildRow(Map<String, Object?> row) {
     final rowid = row[_ridKey] as int;
     return Row(
       children: [
-        for (final c in _columns)
-          InkWell(
-            onTap: () => _editCell(row, c),
-            child: Container(
-              width: _colWidth,
-              height: _rowHeight,
-              alignment: Alignment.centerLeft,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Text(
-                row[c]?.toString() ?? 'NULL',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ),
+        for (final c in _columns) _buildCell(row, c),
         SizedBox(
           width: _actionWidth,
           child: IconButton(
