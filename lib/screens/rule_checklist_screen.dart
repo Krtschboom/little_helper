@@ -6,8 +6,10 @@ import '../widgets/labeled_dropdown.dart';
 import 'rule_editor_screen.dart';
 
 /// A rule based checklist: shows the rows of the linked tables for
-/// which the rules apply. Tick what you have done/bought, then
-/// "Zur Tabelle hinzufügen" writes the new numbers/dates into the tables.
+/// which the rules apply, optionally grouped under headers (e.g. per
+/// supermarket). Tick what you have done/bought, then
+/// "Zur Tabelle hinzufügen" lets you enter new numbers/dates for each
+/// ticked item and writes them into the tables.
 class RuleChecklistScreen extends StatefulWidget {
   const RuleChecklistScreen({super.key, required this.checklistId});
 
@@ -29,22 +31,22 @@ class _SourceResult {
   String? error;
 }
 
-/// One line of the list: a table header, a row, or a message.
-class _Entry {
-  const _Entry.header(this.source)
-      : row = null,
-        message = null,
-        isError = false;
-  const _Entry.item(this.source, this.row)
-      : message = null,
-        isError = false;
-  const _Entry.message(this.source, this.message, {this.isError = false})
-      : row = null;
+enum _EntryKind { header, columns, group, item, message }
 
+/// One line of the list.
+class _Entry {
+  _Entry(this.kind, this.source, {this.row, this.text, this.isError = false});
+
+  final _EntryKind kind;
   final _SourceResult source;
   final Map<String, Object?>? row;
-  final String? message;
+  final String? text;
   final bool isError;
+}
+
+String _labelOf(RuleSet set, Map<String, Object?> row) {
+  final v = row[set.labelColumn]?.toString() ?? '';
+  return v.isEmpty ? '(leer)' : v;
 }
 
 class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
@@ -153,34 +155,40 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
   }
 
   Future<void> _addToTable() async {
-    final inputs = <_AddInput>[
-      for (final r in _results)
-        if (r.checked.isNotEmpty && r.error == null)
-          _AddInput(r.set, r.checked.length),
-    ];
+    final inputs = <_AddInput>[];
+    for (final r in _results) {
+      if (r.checked.isEmpty || r.error != null) continue;
+      final items = <_AddItem>[];
+      for (final row in r.rows) {
+        final id = row[ruleRowIdKey] as int;
+        if (!r.checked.contains(id)) continue;
+        final g = r.set.groupColumn;
+        items.add(_AddItem(
+          rowId: id,
+          label: _labelOf(r.set, row),
+          group: g == null ? null : row[g]?.toString(),
+        ));
+      }
+      inputs.add(_AddInput(r.set, items));
+    }
     if (inputs.isEmpty) return;
 
-    final changes = await showDialog<List<_SourceChanges>>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => _AddToTableDialog(inputs: inputs),
+    final changes = await Navigator.of(context).push<List<_SourceChanges>>(
+      MaterialPageRoute(builder: (_) => _AddToTableScreen(inputs: inputs)),
     );
     if (changes == null || !mounted) return;
 
     try {
       var updated = 0;
       for (final change in changes) {
-        final result = _results.firstWhere((r) => r.set.table == change.table);
-        final ids = result.checked.toList();
-        updated += RuleEngine.applyChanges(
+        updated += RuleEngine.applyChanges(change.table, change.rows);
+        // Done: take the ticks away from the rows that were updated.
+        // Rows that still match the rules show up again, unticked.
+        ChecklistService.clearChecks(
+          widget.checklistId,
           change.table,
-          ids,
-          numbers: change.numbers,
-          dates: change.dates,
+          [for (final c in change.rows) c.rowId],
         );
-        // Done: take the ticks away. Rows that still match the rules
-        // simply show up again, unticked.
-        ChecklistService.clearChecks(widget.checklistId, change.table, ids);
       }
       _load();
       if (mounted) {
@@ -203,12 +211,63 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
     return sb.toString();
   }
 
-  /// Small grey text under an entry: the values the rules looked at.
-  String _details(_SourceResult r, Map<String, Object?> row) {
-    return [
-      for (final c in r.set.usedColumns)
-        if (c != r.set.labelColumn) '$c: ${row[c] ?? '–'}',
-    ].join('  ·  ');
+  // --- Building the list --------------------------------------
+
+  List<_Entry> _buildEntries() {
+    final entries = <_Entry>[];
+    for (final r in _results) {
+      entries.add(_Entry(_EntryKind.header, r));
+      if (r.error != null) {
+        entries.add(_Entry(_EntryKind.message, r, text: r.error, isError: true));
+        continue;
+      }
+      if (r.rows.isEmpty) {
+        entries.add(_Entry(
+          _EntryKind.message,
+          r,
+          text: 'Nichts zu tun - keine Regel trifft zu.',
+        ));
+        continue;
+      }
+      if (r.set.shownColumns.isNotEmpty) {
+        entries.add(_Entry(_EntryKind.columns, r));
+      }
+      final g = r.set.groupColumn;
+      String? lastGroup;
+      var first = true;
+      for (final row in r.rows) {
+        if (g != null) {
+          final key = row[g]?.toString() ?? '';
+          if (first || key != lastGroup) {
+            entries.add(_Entry(
+              _EntryKind.group,
+              r,
+              text: key.isEmpty ? '(ohne $g)' : key,
+            ));
+            lastGroup = key;
+            first = false;
+          }
+        }
+        entries.add(_Entry(_EntryKind.item, r, row: row));
+      }
+    }
+    return entries;
+  }
+
+  /// Shared layout of header and item rows: [checkbox] title | columns.
+  Widget _columnsRow(
+    _SourceResult r, {
+    required Widget leading,
+    required Widget Function(String column) cell,
+    required Widget title,
+  }) {
+    return Row(
+      children: [
+        SizedBox(width: 56, child: leading),
+        Expanded(flex: 3, child: title),
+        for (final c in r.set.shownColumns) Expanded(flex: 2, child: cell(c)),
+      ],
+    );
   }
 
   Widget _buildEntry(_Entry e) {
@@ -216,51 +275,99 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
     final textTheme = Theme.of(context).textTheme;
     final r = e.source;
 
-    final row = e.row;
-    if (row != null) {
-      final id = row[ruleRowIdKey] as int;
-      final details = _details(r, row);
-      return CheckboxListTile(
-        controlAffinity: ListTileControlAffinity.leading,
-        value: r.checked.contains(id),
-        onChanged: (v) => _toggle(r, id, v ?? false),
-        title: Text(row[r.set.labelColumn]?.toString() ?? '(leer)'),
-        subtitle: details.isEmpty ? null : Text(details),
-      );
-    }
-
-    final message = e.message;
-    if (message != null) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Text(
-          message,
-          style: TextStyle(color: e.isError ? scheme.error : null),
-        ),
-      );
-    }
-
-    // Table header
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+    switch (e.kind) {
+      case _EntryKind.header:
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.table_chart_outlined, size: 18),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(r.set.table, style: textTheme.titleSmall),
+              Row(
+                children: [
+                  const Icon(Icons.table_chart_outlined, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(r.set.table, style: textTheme.titleSmall),
+                  ),
+                  if (r.error == null) Text('${r.rows.length}'),
+                ],
               ),
-              if (r.error == null) Text('${r.rows.length}'),
+              const SizedBox(height: 2),
+              Text(_rulesText(r.set), style: textTheme.bodySmall),
             ],
           ),
-          const SizedBox(height: 2),
-          Text(_rulesText(r.set), style: textTheme.bodySmall),
-        ],
-      ),
-    );
+        );
+
+      case _EntryKind.message:
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Text(
+            e.text ?? '',
+            style: TextStyle(color: e.isError ? scheme.error : null),
+          ),
+        );
+
+      case _EntryKind.columns:
+        // Column names above the items: title | extra columns
+        final style = textTheme.labelMedium
+            ?.copyWith(color: scheme.onSurfaceVariant);
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(8, 8, 16, 0),
+          child: _columnsRow(
+            r,
+            leading: const SizedBox.shrink(),
+            title: Text(r.set.labelColumn ?? '', style: style),
+            cell: (c) => Text(c, style: style, overflow: TextOverflow.ellipsis),
+          ),
+        );
+
+      case _EntryKind.group:
+        // "# Supermarkt eins" with a line below
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                e.text ?? '',
+                style: textTheme.titleMedium?.copyWith(color: scheme.primary),
+              ),
+              const Divider(height: 8),
+            ],
+          ),
+        );
+
+      case _EntryKind.item:
+        final row = e.row!;
+        final id = row[ruleRowIdKey] as int;
+        final checked = r.checked.contains(id);
+        return InkWell(
+          onTap: () => _toggle(r, id, !checked),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 8, right: 16),
+            child: _columnsRow(
+              r,
+              leading: Checkbox(
+                value: checked,
+                onChanged: (v) => _toggle(r, id, v ?? false),
+              ),
+              title: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                child: Text(_labelOf(r.set, row)),
+              ),
+              cell: (c) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                child: Text(
+                  row[c]?.toString() ?? '–',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: scheme.onSurfaceVariant),
+                ),
+              ),
+            ),
+          ),
+        );
+    }
   }
 
   @override
@@ -281,19 +388,7 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
       );
     }
 
-    final entries = <_Entry>[];
-    for (final r in _results) {
-      entries.add(_Entry.header(r));
-      if (r.error != null) {
-        entries.add(_Entry.message(r, r.error!, isError: true));
-      } else if (r.rows.isEmpty) {
-        entries.add(_Entry.message(r, 'Nichts zu tun - keine Regel trifft zu.'));
-      } else {
-        for (final row in r.rows) {
-          entries.add(_Entry.item(r, row));
-        }
-      }
-    }
+    final entries = _buildEntries();
     final checkedCount = _results.fold<int>(0, (n, r) => n + r.checked.length);
 
     return Scaffold(
@@ -331,12 +426,21 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
 }
 
 // ---------------------------------------------------------------
-// "Zur Tabelle hinzufügen"
+// "Zur Tabelle hinzufügen": new values for EACH ticked item
 // ---------------------------------------------------------------
 
-/// What the dialog needs to know about one table with ticked rows.
+/// One ticked row.
+class _AddItem {
+  const _AddItem({required this.rowId, required this.label, this.group});
+
+  final int rowId;
+  final String label;
+  final String? group;
+}
+
+/// A table with its ticked rows.
 class _AddInput {
-  _AddInput(this.set, this.count) {
+  _AddInput(this.set, this.items) {
     // Only columns the rules look at can be changed: numbers (e.g. the
     // stock) and dates (e.g. the best-before date).
     for (final c in set.conditions) {
@@ -350,18 +454,19 @@ class _AddInput {
   }
 
   final RuleSet set;
-  final int count;
+  final List<_AddItem> items;
   final List<String> numberColumns = [];
   final List<String> dateColumns = [];
+
+  bool get hasFields => numberColumns.isNotEmpty || dateColumns.isNotEmpty;
 }
 
 /// The new values for the ticked rows of one table.
 class _SourceChanges {
-  const _SourceChanges(this.table, this.numbers, this.dates);
+  const _SourceChanges(this.table, this.rows);
 
   final String table;
-  final Map<String, NumberChange> numbers;
-  final Map<String, String> dates; // column -> ISO date
+  final List<RowChange> rows;
 }
 
 class _NumDraft {
@@ -376,39 +481,53 @@ class _DateDraft {
   RuleUnit unit = RuleUnit.week;
 }
 
-class _AddToTableDialog extends StatefulWidget {
-  const _AddToTableDialog({required this.inputs});
+class _AddToTableScreen extends StatefulWidget {
+  const _AddToTableScreen({required this.inputs});
 
   final List<_AddInput> inputs;
 
   @override
-  State<_AddToTableDialog> createState() => _AddToTableDialogState();
+  State<_AddToTableScreen> createState() => _AddToTableScreenState();
 }
 
-class _AddToTableDialogState extends State<_AddToTableDialog> {
-  late final List<Map<String, _NumDraft>> _nums = [
+class _AddToTableScreenState extends State<_AddToTableScreen> {
+  // [source][item][column] -> what the user entered
+  late final List<List<Map<String, _NumDraft>>> _nums = [
     for (final inp in widget.inputs)
-      {for (final c in inp.numberColumns) c: _NumDraft()},
+      [
+        for (final _ in inp.items)
+          {for (final c in inp.numberColumns) c: _NumDraft()},
+      ],
   ];
-  late final List<Map<String, _DateDraft>> _dates = [
+  late final List<List<Map<String, _DateDraft>>> _dates = [
     for (final inp in widget.inputs)
-      {for (final c in inp.dateColumns) c: _DateDraft()},
+      [
+        for (final _ in inp.items)
+          {for (final c in inp.dateColumns) c: _DateDraft()},
+      ],
   ];
-  String? _error;
 
   @override
   void dispose() {
-    for (final m in _nums) {
-      for (final d in m.values) {
-        d.ctrl.dispose();
+    for (final source in _nums) {
+      for (final item in source) {
+        for (final d in item.values) {
+          d.ctrl.dispose();
+        }
       }
     }
-    for (final m in _dates) {
-      for (final d in m.values) {
-        d.amountCtrl.dispose();
+    for (final source in _dates) {
+      for (final item in source) {
+        for (final d in item.values) {
+          d.amountCtrl.dispose();
+        }
       }
     }
     super.dispose();
+  }
+
+  void _fail(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _pickDate(_DateDraft d) async {
@@ -421,110 +540,132 @@ class _AddToTableDialogState extends State<_AddToTableDialog> {
     if (picked != null && mounted) setState(() => d.fixed = picked);
   }
 
+  /// Copies what was entered for the first item to all other items
+  /// of the same table (a shortcut when many items get the same values).
+  void _copyFirstToAll(int i) {
+    setState(() {
+      final nums = _nums[i];
+      final dates = _dates[i];
+      for (var k = 1; k < nums.length; k++) {
+        nums[0].forEach((col, first) {
+          nums[k][col]!
+            ..add = first.add
+            ..ctrl.text = first.ctrl.text;
+        });
+        dates[0].forEach((col, first) {
+          dates[k][col]!
+            ..mode = first.mode
+            ..fixed = first.fixed
+            ..amountCtrl.text = first.amountCtrl.text
+            ..unit = first.unit;
+        });
+      }
+    });
+  }
+
   void _submit() {
     final out = <_SourceChanges>[];
     for (var i = 0; i < widget.inputs.length; i++) {
       final inp = widget.inputs[i];
-      final numbers = <String, NumberChange>{};
-      final dates = <String, String>{};
+      final rows = <RowChange>[];
 
-      for (final e in _nums[i].entries) {
-        final text = e.value.ctrl.text.trim();
-        if (text.isEmpty) continue; // empty = leave unchanged
-        final value = num.tryParse(text.replaceAll(',', '.'));
-        if (value == null) {
-          setState(() => _error = '"$text" ist keine Zahl (${e.key}).');
-          return;
-        }
-        numbers[e.key] = NumberChange(add: e.value.add, value: value);
-      }
+      for (var k = 0; k < inp.items.length; k++) {
+        final item = inp.items[k];
+        final numbers = <String, NumberChange>{};
+        final dates = <String, String>{};
 
-      for (final e in _dates[i].entries) {
-        final d = e.value;
-        if (d.mode == 1) {
-          final fixed = d.fixed;
-          if (fixed == null) {
-            setState(() => _error = 'Bitte ein Datum wählen (${e.key}).');
+        for (final e in _nums[i][k].entries) {
+          final text = e.value.ctrl.text.trim();
+          if (text.isEmpty) continue; // empty = leave unchanged
+          final value = num.tryParse(text.replaceAll(',', '.'));
+          if (value == null) {
+            _fail('"$text" ist keine Zahl (${item.label}, ${e.key}).');
             return;
           }
-          dates[e.key] = formatIsoDate(fixed);
-        } else if (d.mode == 2) {
-          final amount = int.tryParse(d.amountCtrl.text.trim());
-          if (amount == null || amount < 0) {
-            setState(() => _error = 'Bitte eine Anzahl eingeben (${e.key}).');
-            return;
-          }
-          final now = DateTime.now();
-          final days = amount * (d.unit == RuleUnit.week ? 7 : 1);
-          dates[e.key] = formatIsoDate(DateTime(now.year, now.month, now.day + days));
+          numbers[e.key] = NumberChange(add: e.value.add, value: value);
         }
-      }
 
-      if (numbers.isNotEmpty || dates.isNotEmpty) {
-        out.add(_SourceChanges(inp.set.table, numbers, dates));
+        for (final e in _dates[i][k].entries) {
+          final d = e.value;
+          if (d.mode == 1) {
+            final fixed = d.fixed;
+            if (fixed == null) {
+              _fail('Bitte ein Datum wählen (${item.label}, ${e.key}).');
+              return;
+            }
+            dates[e.key] = formatIsoDate(fixed);
+          } else if (d.mode == 2) {
+            final amount = int.tryParse(d.amountCtrl.text.trim());
+            if (amount == null || amount < 0) {
+              _fail('Bitte eine Anzahl eingeben (${item.label}, ${e.key}).');
+              return;
+            }
+            final now = DateTime.now();
+            final days = amount * (d.unit == RuleUnit.week ? 7 : 1);
+            dates[e.key] =
+                formatIsoDate(DateTime(now.year, now.month, now.day + days));
+          }
+        }
+
+        final change = RowChange(
+          rowId: item.rowId,
+          numbers: numbers,
+          dates: dates,
+        );
+        if (!change.isEmpty) rows.add(change);
       }
+      if (rows.isNotEmpty) out.add(_SourceChanges(inp.set.table, rows));
     }
 
     if (out.isEmpty) {
-      setState(() => _error = 'Bitte mindestens einen neuen Wert angeben.');
+      _fail('Bitte für mindestens einen Eintrag einen neuen Wert angeben.');
       return;
     }
     Navigator.pop(context, out);
   }
 
-  Widget _numberField(int i, String column) {
-    final d = _nums[i][column]!;
+  Widget _numberField(int i, int k, String column) {
+    final d = _nums[i][k][column]!;
     return Padding(
-      padding: const EdgeInsets.only(top: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: const EdgeInsets.only(top: 10),
+      child: Row(
         children: [
-          Text(column, style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 6),
-          Row(
-            children: [
-              Expanded(
-                flex: 3,
-                child: LabeledDropdown<bool>(
-                  label: 'Art',
-                  value: d.add,
-                  items: const {true: 'Erhöhen um', false: 'Setzen auf'},
-                  onChanged: (v) => setState(() => d.add = v),
-                ),
+          Expanded(
+            flex: 3,
+            child: LabeledDropdown<bool>(
+              label: '$column - Art',
+              value: d.add,
+              items: const {true: 'Erhöhen um', false: 'Setzen auf'},
+              onChanged: (v) => setState(() => d.add = v),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            flex: 2,
+            child: TextField(
+              controller: d.ctrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(
+                labelText: 'Wert',
+                isDense: true,
+                border: OutlineInputBorder(),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                flex: 2,
-                child: TextField(
-                  controller: d.ctrl,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  decoration: const InputDecoration(
-                    labelText: 'Wert',
-                    isDense: true,
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _dateField(int i, String column) {
-    final d = _dates[i][column]!;
+  Widget _dateField(int i, int k, String column) {
+    final d = _dates[i][k][column]!;
     return Padding(
-      padding: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.only(top: 10),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(column, style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 6),
           LabeledDropdown<int>(
-            label: 'Neues Datum',
+            label: '$column - neues Datum',
             value: d.mode,
             items: const {
               0: 'Unverändert lassen',
@@ -582,71 +723,81 @@ class _AddToTableDialogState extends State<_AddToTableDialog> {
     );
   }
 
-  Widget _buildSource(int i) {
+  Widget _buildItem(int i, int k) {
     final inp = widget.inputs[i];
-    final hasFields = inp.numberColumns.isNotEmpty || inp.dateColumns.isNotEmpty;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Divider(height: 24),
-        Text(
-          '${inp.set.table} · ${inp.count} '
-          '${inp.count == 1 ? 'Eintrag' : 'Einträge'}',
-          style: Theme.of(context).textTheme.titleSmall,
+    final item = inp.items[k];
+    final textTheme = Theme.of(context).textTheme;
+    return Card(
+      margin: const EdgeInsets.only(top: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(item.label, style: textTheme.titleSmall),
+            if (item.group != null && item.group!.isNotEmpty)
+              Text(item.group!, style: textTheme.bodySmall),
+            for (final c in inp.numberColumns) _numberField(i, k, c),
+            for (final c in inp.dateColumns) _dateField(i, k, c),
+          ],
         ),
-        if (!hasFields)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              'In den Regeln gibt es keine Zahlen- oder Datumsspalte, '
-              'die geändert werden könnte.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ),
-        for (final c in inp.numberColumns) _numberField(i, c),
-        for (final c in inp.dateColumns) _dateField(i, c),
-      ],
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Zur Tabelle hinzufügen'),
-      content: SizedBox(
-        width: 440,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Die neuen Werte werden bei allen abgehakten Einträgen in die '
-                'Tabelle geschrieben. Leere Felder bleiben unverändert.',
-              ),
-              for (var i = 0; i < widget.inputs.length; i++) _buildSource(i),
-              if (_error != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Text(
-                    _error!,
-                    style: TextStyle(color: Theme.of(context).colorScheme.error),
-                  ),
-                ),
-            ],
+    final textTheme = Theme.of(context).textTheme;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Zur Tabelle hinzufügen'),
+        actions: [
+          TextButton.icon(
+            onPressed: _submit,
+            icon: const Icon(Icons.check),
+            label: const Text('Eintragen'),
           ),
-        ),
+        ],
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Abbrechen'),
-        ),
-        FilledButton(
-          onPressed: _submit,
-          child: const Text('Eintragen'),
-        ),
-      ],
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text(
+            'Gib für jeden abgehakten Eintrag die neuen Werte an. '
+            'Leere Felder bleiben unverändert; Einträge ohne neuen Wert '
+            'werden übersprungen und bleiben abgehakt.',
+          ),
+          for (var i = 0; i < widget.inputs.length; i++) ...[
+            const SizedBox(height: 20),
+            Text(
+              '${widget.inputs[i].set.table} · ${widget.inputs[i].items.length} '
+              '${widget.inputs[i].items.length == 1 ? 'Eintrag' : 'Einträge'}',
+              style: textTheme.titleMedium,
+            ),
+            if (!widget.inputs[i].hasFields)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'In den Regeln gibt es keine Zahlen- oder Datumsspalte, '
+                  'die geändert werden könnte.',
+                  style: textTheme.bodySmall,
+                ),
+              )
+            else if (widget.inputs[i].items.length > 1)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () => _copyFirstToAll(i),
+                  icon: const Icon(Icons.copy_all),
+                  label: const Text('Werte vom ersten Eintrag für alle übernehmen'),
+                ),
+              ),
+            if (widget.inputs[i].hasFields)
+              for (var k = 0; k < widget.inputs[i].items.length; k++)
+                _buildItem(i, k),
+          ],
+        ],
+      ),
     );
   }
 }

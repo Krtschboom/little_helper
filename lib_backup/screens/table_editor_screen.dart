@@ -95,7 +95,7 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
       final recorded = DbService.instance.columnTypesFor(widget.table);
       final appTypes = {
         for (final c in columns)
-          c: recorded[c] ?? _guessAppType(c, sqlTypes[c]!),
+          c: recorded[c] ?? DbService.guessAppType(c, sqlTypes[c]!),
       };
 
       final rows = [
@@ -139,27 +139,6 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
       _haystack[i] = _haystackOf(row);
       _applyView();
     });
-  }
-
-  /// App display type of a column when nothing was recorded: guess
-  /// from the column name (tables created outside the app), otherwise
-  /// the raw SQLite type.
-  String _guessAppType(String column, String sqlType) {
-    final lower = column.toLowerCase();
-    if (lower.contains('datum') ||
-        lower.contains('date') ||
-        lower.contains('geburtstag') ||
-        lower == 'tag') {
-      return 'DATUM';
-    }
-    if (lower.contains('bool') ||
-        lower.startsWith('is_') ||
-        lower.startsWith('ist_') ||
-        lower.startsWith('has_') ||
-        lower.startsWith('hat_')) {
-      return 'BOOLEAN';
-    }
-    return sqlType;
   }
 
   // --- Search and sort ----------------------------------------

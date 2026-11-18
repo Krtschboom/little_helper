@@ -5,7 +5,9 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:sqlite3/sqlite3.dart' show ResultSet;
 
+import '../services/checklist_service.dart';
 import '../services/db_service.dart';
+import '../widgets/text_prompt_dialog.dart';
 import 'table_editor_screen.dart';
 
 /// Quotes a table/column name for SQL (doubles any `"` inside it).
@@ -202,6 +204,12 @@ class _InventoryScreenState extends State<InventoryScreen> {
         rethrow;
       }
 
+      // Rule checklists that use a renamed column follow the new name
+      // (after COMMIT, so a rollback can never leave them out of sync).
+      for (final e in edits.renames.entries) {
+        ChecklistService.onColumnRenamed(table, e.key, e.value);
+      }
+
       _loadTables();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -215,15 +223,12 @@ class _InventoryScreenState extends State<InventoryScreen> {
 
   /// Renames a table via ALTER TABLE ... RENAME TO.
   Future<void> _renameTable(String table) async {
-    final newName = await showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => _TextPromptDialog(
-        title: 'Tabelle "$table" umbenennen',
-        label: 'Neuer Name',
-        initial: table,
-        confirmLabel: 'Umbenennen',
-      ),
+    final newName = await showTextPrompt(
+      context,
+      title: 'Tabelle "$table" umbenennen',
+      label: 'Neuer Name',
+      initial: table,
+      confirmLabel: 'Umbenennen',
     );
     if (newName == null || newName.isEmpty || newName == table || !mounted) {
       return;
@@ -234,6 +239,8 @@ class _InventoryScreenState extends State<InventoryScreen> {
           .execute('ALTER TABLE ${_q(table)} RENAME TO ${_q(newName)}');
       // Move the recorded DATUM/BOOLEAN/COUNTER types to the new name.
       DbService.instance.renameTableTypes(table, newName);
+      // Rule checklists that use this table follow the new name.
+      ChecklistService.onTableRenamed(table, newName);
       _loadTables();
     } catch (e) {
       _showError(e);
@@ -518,6 +525,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
     try {
       DbService.instance.database.execute('DROP TABLE ${_q(table)}');
       DbService.instance.deleteTableTypes(table);
+      ChecklistService.onTableDropped(table);
       _loadTables();
     } catch (e) {
       _showError(e);
@@ -732,60 +740,6 @@ class _CounterCheckbox extends StatelessWidget {
       onChanged: (v) => onChanged(v ?? false),
       title: const Text('Plus-/Minus-Buttons in der Tabelle'),
       subtitle: const Text('Wert direkt um 1 erhöhen oder verringern'),
-    );
-  }
-}
-
-/// Small dialog with one text field (used for renaming a table).
-class _TextPromptDialog extends StatefulWidget {
-  const _TextPromptDialog({
-    required this.title,
-    required this.label,
-    required this.confirmLabel,
-    this.initial = '',
-  });
-
-  final String title;
-  final String label;
-  final String confirmLabel;
-  final String initial;
-
-  @override
-  State<_TextPromptDialog> createState() => _TextPromptDialogState();
-}
-
-class _TextPromptDialogState extends State<_TextPromptDialog> {
-  late final TextEditingController _controller =
-      TextEditingController(text: widget.initial);
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _submit() => Navigator.pop(context, _controller.text.trim());
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: Text(widget.title),
-      content: TextField(
-        controller: _controller,
-        autofocus: true,
-        decoration: InputDecoration(labelText: widget.label),
-        onSubmitted: (_) => _submit(),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Abbrechen'),
-        ),
-        FilledButton(
-          onPressed: _submit,
-          child: Text(widget.confirmLabel),
-        ),
-      ],
     );
   }
 }

@@ -362,6 +362,15 @@ class ChecklistService {
             s.labelColumn = newName;
             changed = true;
           }
+          if (s.groupColumn == oldName) {
+            s.groupColumn = newName;
+            changed = true;
+          }
+          final shown = s.displayColumns.indexOf(oldName);
+          if (shown >= 0) {
+            s.displayColumns[shown] = newName;
+            changed = true;
+          }
           for (final c in s.conditions) {
             if (c.column == oldName) {
               c.column = newName;

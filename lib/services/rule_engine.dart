@@ -185,12 +185,32 @@ class RuleSet {
   RuleSet({
     required this.table,
     this.labelColumn,
+    this.groupColumn,
+    List<String>? displayColumns,
     List<RuleCondition>? conditions,
-  }) : conditions = conditions ?? [];
+  })  : displayColumns = displayColumns ?? [],
+        conditions = conditions ?? [];
 
   String table;
   String? labelColumn;
+
+  /// Optional: rows with the same value in this column are listed
+  /// together under a header (e.g. the supermarket).
+  String? groupColumn;
+
+  /// Extra columns shown next to the title (e.g. price, quantity).
+  List<String> displayColumns;
   List<RuleCondition> conditions;
+
+  /// The columns shown next to the title: the chosen [displayColumns],
+  /// or - if none were chosen - the columns the rules look at.
+  List<String> get shownColumns {
+    if (displayColumns.isNotEmpty) return displayColumns;
+    return [
+      for (final c in usedColumns)
+        if (c != labelColumn && c != groupColumn) c,
+    ];
+  }
 
   /// Every column the rules look at (left and right side), without
   /// duplicates, in the order of the rules.
@@ -207,12 +227,18 @@ class RuleSet {
   Map<String, Object?> toJson() => {
         'table': table,
         'labelColumn': labelColumn,
+        'groupColumn': groupColumn,
+        'displayColumns': displayColumns,
         'conditions': [for (final c in conditions) c.toJson()],
       };
 
   factory RuleSet.fromJson(Map<String, dynamic> j) => RuleSet(
         table: j['table'] as String,
         labelColumn: j['labelColumn'] as String?,
+        groupColumn: j['groupColumn'] as String?,
+        displayColumns: [
+          for (final c in (j['displayColumns'] as List? ?? const [])) c as String,
+        ],
         conditions: [
           for (final c in (j['conditions'] as List? ?? const []))
             RuleCondition.fromJson(c as Map<String, dynamic>),
@@ -226,6 +252,26 @@ class NumberChange {
 
   final bool add;
   final num value;
+}
+
+/// The new values for ONE row of a table.
+class RowChange {
+  const RowChange({
+    required this.rowId,
+    this.numbers = const {},
+    this.dates = const {},
+  });
+
+  /// SQLite rowid of the row.
+  final int rowId;
+
+  /// Number column -> set / increase.
+  final Map<String, NumberChange> numbers;
+
+  /// Date column -> ISO date 'YYYY-MM-DD'.
+  final Map<String, String> dates;
+
+  bool get isEmpty => numbers.isEmpty && dates.isEmpty;
 }
 
 class RuleEngine {
@@ -283,6 +329,13 @@ class RuleEngine {
     if (label == null || !names.contains(label)) {
       return 'Die Titel-Spalte fehlt oder existiert nicht mehr.';
     }
+    final group = set.groupColumn;
+    if (group != null && !names.contains(group)) {
+      return 'Die Spalte "$group" (Überschrift) existiert nicht mehr.';
+    }
+    for (final c in set.displayColumns) {
+      if (!names.contains(c)) return 'Die angezeigte Spalte "$c" existiert nicht mehr.';
+    }
     if (set.conditions.isEmpty) return 'Es ist mindestens eine Regel nötig.';
 
     for (final c in set.conditions) {
@@ -327,9 +380,15 @@ class RuleEngine {
   static List<Map<String, Object?>> matchingRows(RuleSet set) {
     final where = whereOf(set);
     final label = set.labelColumn;
-    final order = label == null
-        ? ''
-        : ' ORDER BY ${DbService.quoteIdentifier(label)} COLLATE NOCASE';
+    final group = set.groupColumn;
+    final orderParts = [
+      // Rows without a group value come last.
+      if (group != null)
+        '(${DbService.quoteIdentifier(group)} IS NULL), '
+            '${DbService.quoteIdentifier(group)} COLLATE NOCASE',
+      if (label != null) '${DbService.quoteIdentifier(label)} COLLATE NOCASE',
+    ];
+    final order = orderParts.isEmpty ? '' : ' ORDER BY ${orderParts.join(', ')}';
     final result = _db.select(
       'SELECT rowid AS $ruleRowIdKey, * '
       'FROM ${DbService.quoteIdentifier(set.table)} '
@@ -427,45 +486,33 @@ class RuleEngine {
 
   // --- Changing rows ------------------------------------------
 
-  /// Writes new values into the rows [rowIds] of [table]: [numbers]
-  /// sets or increases number columns, [dates] sets date columns
-  /// (value = ISO date 'YYYY-MM-DD'). All or nothing. Returns the
-  /// number of rows that were updated.
-  static int applyChanges(
-    String table,
-    Iterable<int> rowIds, {
-    Map<String, NumberChange> numbers = const {},
-    Map<String, String> dates = const {},
-  }) {
-    final sets = <String>[];
-    final args = <Object?>[];
-    numbers.forEach((column, change) {
-      final col = DbService.quoteIdentifier(column);
-      sets.add(change.add ? '$col = COALESCE($col, 0) + ?' : '$col = ?');
-      args.add(change.value);
-    });
-    dates.forEach((column, iso) {
-      sets.add('${DbService.quoteIdentifier(column)} = ?');
-      args.add(iso);
-    });
-    if (sets.isEmpty) return 0;
-
-    final ids = rowIds.toList();
+  /// Writes new values into single rows of [table]: every [RowChange]
+  /// has its own numbers (set / increase) and dates. All or nothing.
+  /// Returns the number of rows that were updated.
+  static int applyChanges(String table, List<RowChange> changes) {
     final db = _db;
     var count = 0;
     db.execute('BEGIN');
     try {
-      final stmt = db.prepare(
-        'UPDATE ${DbService.quoteIdentifier(table)} '
-        'SET ${sets.join(', ')} WHERE rowid = ?',
-      );
-      try {
-        for (final id in ids) {
-          stmt.execute([...args, id]);
-          count++;
-        }
-      } finally {
-        stmt.dispose();
+      for (final change in changes) {
+        if (change.isEmpty) continue;
+        final sets = <String>[];
+        final args = <Object?>[];
+        change.numbers.forEach((column, n) {
+          final col = DbService.quoteIdentifier(column);
+          sets.add(n.add ? '$col = COALESCE($col, 0) + ?' : '$col = ?');
+          args.add(n.value);
+        });
+        change.dates.forEach((column, iso) {
+          sets.add('${DbService.quoteIdentifier(column)} = ?');
+          args.add(iso);
+        });
+        db.execute(
+          'UPDATE ${DbService.quoteIdentifier(table)} '
+          'SET ${sets.join(', ')} WHERE rowid = ?',
+          [...args, change.rowId],
+        );
+        count++;
       }
       db.execute('COMMIT');
     } catch (_) {

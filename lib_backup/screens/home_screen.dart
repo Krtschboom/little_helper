@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/db_service.dart';
+import 'checklists_screen.dart';
 import 'database_selection_screen.dart';
 import 'inventory_screen.dart';
 import 'settings_screen.dart';
@@ -64,6 +65,18 @@ class HomeScreen extends StatelessWidget {
               },
               icon: const Icon(Icons.inventory_2_outlined),
               label: const Text('Inventory'),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const ChecklistsScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.checklist),
+              label: const Text('Checklists'),
             ),
           ],
         ),
