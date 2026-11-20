@@ -44,6 +44,8 @@ class _CondDraft {
 class _SourceDraft {
   String? table;
   String? label;
+  String? group;
+  final List<String> display = [];
   List<RuleColumn> columns = [];
   final List<_CondDraft> conds = [];
 }
@@ -102,7 +104,9 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
   _SourceDraft _draftFromSet(RuleSet set) {
     final src = _SourceDraft()
       ..table = set.table
-      ..label = set.labelColumn;
+      ..label = set.labelColumn
+      ..group = set.groupColumn;
+    src.display.addAll(set.displayColumns);
     try {
       src.columns = RuleEngine.columnsOf(set.table);
     } catch (_) {}
@@ -203,6 +207,8 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
         }
       }
       s.label = label ?? (s.columns.isEmpty ? null : s.columns.first.name);
+      s.group = null;
+      s.display.clear();
       if (s.columns.isNotEmpty) s.conds.add(_newCond(s));
     });
   }
@@ -242,6 +248,8 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
       final set = RuleSet(
         table: table,
         labelColumn: s.label,
+        groupColumn: s.group,
+        displayColumns: List.of(s.display),
         conditions: [for (final d in s.conds) _toCondition(d)],
       );
       final error = RuleEngine.validate(set);
@@ -439,7 +447,54 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
                 label: 'Titel-Spalte',
                 value: s.label,
                 items: {for (final c in s.columns) c.name: c.name},
-                onChanged: (v) => setState(() => s.label = v),
+                onChanged: (v) => setState(() {
+                  s.label = v;
+                  if (s.group == v) s.group = null;
+                  s.display.remove(v);
+                }),
+              ),
+              const SizedBox(height: 8),
+              LabeledDropdown<String>(
+                label: 'Gruppieren nach (Überschrift)',
+                value: s.group ?? '',
+                items: {
+                  '': 'Keine Gruppierung',
+                  for (final c in s.columns)
+                    if (c.name != s.label) c.name: c.name,
+                },
+                onChanged: (v) => setState(() {
+                  s.group = v.isEmpty ? null : v;
+                  s.display.remove(s.group);
+                }),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Weitere angezeigte Spalten',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+              Text(
+                'Erscheinen neben dem Titel, in der Reihenfolge der Auswahl. '
+                'Ohne Auswahl werden die Spalten aus den Regeln gezeigt.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 8,
+                children: [
+                  for (final c in s.columns)
+                    if (c.name != s.label && c.name != s.group)
+                      FilterChip(
+                        label: Text(c.name),
+                        selected: s.display.contains(c.name),
+                        onSelected: (on) => setState(() {
+                          if (on) {
+                            s.display.add(c.name);
+                          } else {
+                            s.display.remove(c.name);
+                          }
+                        }),
+                      ),
+                ],
               ),
               const SizedBox(height: 16),
               Text('Regeln', style: Theme.of(context).textTheme.titleSmall),
