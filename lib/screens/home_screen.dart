@@ -5,6 +5,7 @@ import 'checklists_screen.dart';
 import 'database_selection_screen.dart';
 import 'inventory_screen.dart';
 import 'settings_screen.dart';
+import 'notes_screen.dart';
 
 /// Placeholder main screen shown once the database is connected.
 class HomeScreen extends StatelessWidget {
@@ -108,7 +109,7 @@ class HomeScreen extends StatelessWidget {
               onPressed: () {
                 Navigator.of(context).push(
                   MaterialPageRoute(
-                    builder: (_) => const InventoryScreen(),
+                    builder: (_) => const NotesScreen(),
                   ),
                 );
               },
