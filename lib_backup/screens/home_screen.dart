@@ -41,21 +41,17 @@ class HomeScreen extends StatelessWidget {
         ],
       ),
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+        child: GridView.count(
+          crossAxisCount: 2, // Number of columns
+          crossAxisSpacing: 8,
+          mainAxisSpacing: 8,
           children: [
-            Icon(
-              Icons.check_circle,
-              color: Theme.of(context).colorScheme.primary,
-              size: 64,
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'Datenbank verbunden: ${DbService.instance.path}',
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 32),
-            FilledButton.icon(
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(0), // Square corners
+                ),
+              ),
               onPressed: () {
                 Navigator.of(context).push(
                   MaterialPageRoute(
@@ -66,8 +62,13 @@ class HomeScreen extends StatelessWidget {
               icon: const Icon(Icons.inventory_2_outlined),
               label: const Text('Inventory'),
             ),
-            const SizedBox(height: 12),
-            FilledButton.icon(
+
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(0), // Square corners
+                ),
+              ),
               onPressed: () {
                 Navigator.of(context).push(
                   MaterialPageRoute(
@@ -78,8 +79,84 @@ class HomeScreen extends StatelessWidget {
               icon: const Icon(Icons.checklist),
               label: const Text('Checklists'),
             ),
+
+
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(0), // Square corners
+                ),
+              ),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const InventoryScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.no_adult_content_rounded),
+              label: const Text('Alerts'),
+            ),
+
+
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(0), // Square corners
+                ),
+              ),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const InventoryScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.note_outlined),
+              label: const Text('Notes'),
+            ),
+
           ],
-        ),
+        )
+        // child: Column(
+        //   mainAxisAlignment: MainAxisAlignment.center,
+        //   children: [
+        //     // Icon(
+        //     //   Icons.check_circle,
+        //     //   color: Theme.of(context).colorScheme.primary,
+        //     //   size: 64,
+        //     // ),
+        //     // const SizedBox(height: 50),
+        //     // Text(
+        //     //   'Datenbank verbunden: ${DbService.instance.path}',
+        //     //   textAlign: TextAlign.center,
+        //     // ),
+        //     // const SizedBox(height: 32),
+        //     FilledButton.icon(
+        //       onPressed: () {
+        //         Navigator.of(context).push(
+        //           MaterialPageRoute(
+        //             builder: (_) => const InventoryScreen(),
+        //           ),
+        //         );
+        //       },
+        //       icon: const Icon(Icons.inventory_2_outlined),
+        //       label: const Text('Inventory'),
+        //     ),
+        //     const SizedBox(height: 12),
+        //     FilledButton.icon(
+        //       onPressed: () {
+        //         Navigator.of(context).push(
+        //           MaterialPageRoute(
+        //             builder: (_) => const ChecklistsScreen(),
+        //           ),
+        //         );
+        //       },
+        //       icon: const Icon(Icons.checklist),
+        //       label: const Text('Checklists'),
+        //     ),
+        //   ],
+        // ),
       ),
     );
   }

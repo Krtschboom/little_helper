@@ -43,6 +43,9 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
   /// Column -> declared SQLite type, UPPERCASE ('INTEGER', 'TEXT', ...).
   Map<String, String> _sqlTypes = {};
 
+  /// Primary key columns (e.g. an auto-increment id).
+  Set<String> _pkColumns = {};
+
   /// Column -> app display type ('DATUM', 'BOOLEAN', or the SQLite type).
   Map<String, String> _appTypes = {};
 
@@ -84,11 +87,13 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
       final info = _db.select('PRAGMA table_info($_table)');
       final columns = <String>[];
       final sqlTypes = <String, String>{};
+      final pkColumns = <String>{};
       for (final c in info) {
         final name = c['name'] as String;
         final type = ((c['type'] as String?) ?? '').trim().toUpperCase();
         columns.add(name);
         sqlTypes[name] = type.isEmpty ? 'TEXT' : type;
+        if (((c['pk'] as int?) ?? 0) > 0) pkColumns.add(name);
       }
 
       // One query for all recorded app types instead of one per call.
@@ -106,6 +111,7 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
       setState(() {
         _columns = columns;
         _sqlTypes = sqlTypes;
+        _pkColumns = pkColumns;
         _appTypes = appTypes;
         _rows = rows;
         _haystack = [for (final r in rows) _haystackOf(r)];
@@ -292,7 +298,15 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
   /// [delta] (NULL counts as 0). Only this one row is updated; the
   /// list is NOT re-sorted, so the row does not jump around while you
   /// keep pressing the button.
-  void _stepCell(Map<String, Object?> row, String column, int delta) {
+  ///
+  /// If [-] brings the counter to 0 and the table has another row for
+  /// the same item (see [_identityColumns]), the user is asked whether
+  /// this now empty row should be deleted.
+  Future<void> _stepCell(
+    Map<String, Object?> row,
+    String column,
+    int delta,
+  ) async {
     final rowid = row[_ridKey] as int;
     final col = DbService.quoteIdentifier(column);
     try {
@@ -310,9 +324,73 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
       setState(() {
         if (i >= 0) _haystack[i] = _haystackOf(row);
       });
+
+      final value = row[column];
+      if (delta < 0 && value is num && value == 0) {
+        await _offerDeleteIfTwin(row);
+      }
     } catch (e) {
       _showError(e);
     }
+  }
+
+  /// The columns that make two rows "the same item": every column
+  /// except the primary key, the dates and the counters (those differ
+  /// between two packages of the same product).
+  List<String> get _identityColumns => [
+        for (final c in _columns)
+          if (!_pkColumns.contains(c) &&
+              _appTypes[c] != 'DATUM' &&
+              _appTypes[c] != 'COUNTER')
+            c,
+      ];
+
+  /// Asks whether [row] (counter at 0) should be deleted, but only if
+  /// another row has the same values in all [_identityColumns].
+  Future<void> _offerDeleteIfTwin(Map<String, Object?> row) async {
+    final cols = _identityColumns;
+    if (cols.isEmpty) return;
+
+    final rowid = row[_ridKey] as int;
+    // IS (not =) so that empty (NULL) values count as equal, too.
+    final where =
+        cols.map((c) => '${DbService.quoteIdentifier(c)} IS ?').join(' AND ');
+    final twins = _db.select(
+      'SELECT COUNT(*) AS n FROM $_table WHERE rowid != ? AND $where',
+      [rowid, for (final c in cols) row[c]],
+    );
+    if ((twins.first['n'] as int) == 0 || !mounted) return;
+
+    final summary = cols
+        .map((c) => row[c])
+        .where((v) => v != null && v.toString().isNotEmpty)
+        .take(2)
+        .join(' · ');
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Leeren Eintrag löschen?'),
+        content: Text(
+          '${summary.isEmpty ? 'Dieser Eintrag' : '„$summary“'} ist auf 0. '
+          'Es gibt noch einen weiteren Eintrag mit denselben Werten '
+          '(nur Datum und Zähler sind anders). '
+          'Soll dieser leere Eintrag gelöscht werden?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Behalten'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Löschen'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    _removeRow(rowid);
   }
 
   /// Converts what the add-row dialog returned into the value that is
@@ -380,7 +458,11 @@ class _TableEditorScreenState extends State<TableEditorScreen> {
       ),
     );
     if (confirmed != true || !mounted) return;
+    _removeRow(rowid);
+  }
 
+  /// Deletes a row from the table and from the list on screen.
+  void _removeRow(int rowid) {
     try {
       _db.execute('DELETE FROM $_table WHERE rowid = ?', [rowid]);
       setState(() {

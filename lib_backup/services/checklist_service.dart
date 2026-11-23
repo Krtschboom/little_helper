@@ -7,12 +7,13 @@ import 'rule_engine.dart';
 
 // ===============================================================
 // Checklist storage. Everything lives inside the (encrypted) SQLite
-// file in three internal tables (names start with `_app_`, so the
+// file in four internal tables (names start with `_app_`, so the
 // Inventory screen does not list them):
 //
 //   _app_checklists        one row per checklist (name, type, config)
 //   _app_checklist_items   the entries of NORMAL checklists
 //   _app_checklist_checks  the ticked rows of RULE checklists
+//   _app_checklist_extras  entries typed in by hand into RULE checklists
 // ===============================================================
 
 enum ChecklistType { manual, rule }
@@ -61,6 +62,26 @@ class ManualItem {
   final List<String> cells;
 }
 
+/// An entry that was typed in by hand into a RULE checklist. It waits
+/// in the list until it is ticked and added to its table.
+class ExtraItem {
+  const ExtraItem({
+    required this.id,
+    required this.table,
+    required this.checked,
+    required this.cells,
+  });
+
+  final int id;
+
+  /// The table the entry will be added to.
+  final String table;
+  final bool checked;
+
+  /// Column name -> text as typed (dates ISO, booleans '1' / '0').
+  final Map<String, String> cells;
+}
+
 class ChecklistService {
   ChecklistService._();
 
@@ -95,6 +116,16 @@ class ChecklistService {
           table_name TEXT NOT NULL,
           row_id INTEGER NOT NULL,
           PRIMARY KEY (checklist_id, table_name, row_id)
+        )
+      ''');
+      db.execute('''
+        CREATE TABLE IF NOT EXISTS _app_checklist_extras (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          checklist_id INTEGER NOT NULL,
+          table_name TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          checked INTEGER NOT NULL DEFAULT 0,
+          cells TEXT NOT NULL
         )
       ''');
       _readyDb = db;
@@ -164,6 +195,13 @@ class ChecklistService {
         id,
       ],
     );
+    // Hand-typed entries of tables that are not linked any more go away.
+    final tables = [for (final s in sources) s.table];
+    _db.execute(
+      'DELETE FROM _app_checklist_extras WHERE checklist_id = ? '
+      'AND table_name NOT IN (${List.filled(tables.length, '?').join(', ')})',
+      [id, ...tables],
+    );
   }
 
   /// Deletes a checklist with all its entries and ticks.
@@ -173,6 +211,7 @@ class ChecklistService {
     try {
       db.execute('DELETE FROM _app_checklist_items WHERE checklist_id = ?', [id]);
       db.execute('DELETE FROM _app_checklist_checks WHERE checklist_id = ?', [id]);
+      db.execute('DELETE FROM _app_checklist_extras WHERE checklist_id = ?', [id]);
       db.execute('DELETE FROM _app_checklists WHERE id = ?', [id]);
       db.execute('COMMIT');
     } catch (_) {
@@ -316,12 +355,85 @@ class ChecklistService {
     }
   }
 
+  // --- Hand-typed entries of rule checklists ------------------
+
+  /// The hand-typed entries of a rule checklist (all its tables).
+  static List<ExtraItem> extras(int checklistId) {
+    final rows = _db.select(
+      'SELECT id, table_name, checked, cells FROM _app_checklist_extras '
+      'WHERE checklist_id = ? ORDER BY position, id',
+      [checklistId],
+    );
+    return [
+      for (final r in rows)
+        ExtraItem(
+          id: r['id'] as int,
+          table: r['table_name'] as String,
+          checked: (r['checked'] as int) != 0,
+          cells: {
+            for (final e
+                in (jsonDecode(r['cells'] as String) as Map<String, dynamic>)
+                    .entries)
+              e.key: e.value?.toString() ?? '',
+          },
+        ),
+    ];
+  }
+
+  static void addExtra(int checklistId, String table, Map<String, String> cells) {
+    final next = _db.select(
+      'SELECT COALESCE(MAX(position), 0) + 1 AS p '
+      'FROM _app_checklist_extras WHERE checklist_id = ?',
+      [checklistId],
+    ).first['p'] as int;
+    _db.execute(
+      'INSERT INTO _app_checklist_extras '
+      '(checklist_id, table_name, position, checked, cells) '
+      'VALUES (?, ?, ?, 0, ?)',
+      [checklistId, table, next, jsonEncode(cells)],
+    );
+  }
+
+  static void updateExtra(int id, Map<String, String> cells) {
+    _db.execute(
+      'UPDATE _app_checklist_extras SET cells = ? WHERE id = ?',
+      [jsonEncode(cells), id],
+    );
+  }
+
+  static void setExtraChecked(int id, bool checked) {
+    _db.execute(
+      'UPDATE _app_checklist_extras SET checked = ? WHERE id = ?',
+      [checked ? 1 : 0, id],
+    );
+  }
+
+  static void deleteExtras(Iterable<int> ids) {
+    final db = _db;
+    db.execute('BEGIN');
+    try {
+      for (final id in ids) {
+        db.execute('DELETE FROM _app_checklist_extras WHERE id = ?', [id]);
+      }
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
+  }
+
   // --- Keeping rules in sync with renamed tables/columns ------
   // Called by the Inventory screen. Never throw: a checklist problem
   // must not break renaming a table.
 
   static void onTableRenamed(String oldName, String newName) {
     try {
+      // First the hand-typed entries: updateRuleSources below removes
+      // entries of tables that are not linked (any more).
+      _db.execute(
+        'UPDATE _app_checklist_extras SET table_name = ? WHERE table_name = ?',
+        [newName, oldName],
+      );
       for (final list in all()) {
         if (list.type != ChecklistType.rule) continue;
         final sources = list.sources;
@@ -347,6 +459,10 @@ class ChecklistService {
         'DELETE FROM _app_checklist_checks WHERE table_name = ?',
         [table],
       );
+      _db.execute(
+        'DELETE FROM _app_checklist_extras WHERE table_name = ?',
+        [table],
+      );
     } catch (_) {}
   }
 
@@ -366,6 +482,10 @@ class ChecklistService {
             s.groupColumn = newName;
             changed = true;
           }
+          if (s.uniqueColumn == oldName) {
+            s.uniqueColumn = newName;
+            changed = true;
+          }
           final shown = s.displayColumns.indexOf(oldName);
           if (shown >= 0) {
             s.displayColumns[shown] = newName;
@@ -383,6 +503,20 @@ class ChecklistService {
           }
         }
         if (changed) updateRuleSources(list.id, sources);
+      }
+      // Hand-typed entries remember their values per column name.
+      final extras = _db.select(
+        'SELECT id, cells FROM _app_checklist_extras WHERE table_name = ?',
+        [table],
+      );
+      for (final r in extras) {
+        final cells = jsonDecode(r['cells'] as String) as Map<String, dynamic>;
+        if (!cells.containsKey(oldName)) continue;
+        cells[newName] = cells.remove(oldName);
+        _db.execute(
+          'UPDATE _app_checklist_extras SET cells = ? WHERE id = ?',
+          [jsonEncode(cells), r['id']],
+        );
       }
     } catch (_) {}
   }

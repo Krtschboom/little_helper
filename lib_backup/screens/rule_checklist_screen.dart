@@ -10,6 +10,11 @@ import 'rule_editor_screen.dart';
 /// supermarket). Tick what you have done/bought, then
 /// "Zur Tabelle hinzufügen" lets you enter new numbers/dates for each
 /// ticked item and writes them into the tables.
+///
+/// With a "unique" column rows with the same value are ONE entry (see
+/// [RuleSet.uniqueColumn]). Besides the entries the rules produce you
+/// can add entries by hand (plus button); once ticked they are added
+/// to their table together with the rest.
 class RuleChecklistScreen extends StatefulWidget {
   const RuleChecklistScreen({super.key, required this.checklistId});
 
@@ -28,21 +33,36 @@ class _SourceResult {
 
   /// Row ids (rowid) the user has ticked.
   Set<int> checked = {};
+
+  /// Entries typed in by hand for this table.
+  List<ExtraItem> extras = [];
   String? error;
 }
 
-enum _EntryKind { header, columns, group, item, message }
+enum _EntryKind { header, columns, group, item, extraHeader, extra, message }
 
 /// One line of the list.
 class _Entry {
-  _Entry(this.kind, this.source, {this.row, this.text, this.isError = false});
+  _Entry(
+    this.kind,
+    this.source, {
+    this.row,
+    this.extra,
+    this.text,
+    this.isError = false,
+  });
 
   final _EntryKind kind;
   final _SourceResult source;
   final Map<String, Object?>? row;
+  final ExtraItem? extra;
   final String? text;
   final bool isError;
 }
+
+/// What the dialog for a hand-typed entry hands back: the values to
+/// save, or the wish to delete the entry.
+typedef _ExtraResult = ({Map<String, String>? cells, bool delete});
 
 String _labelOf(RuleSet set, Map<String, Object?> row) {
   final v = row[set.labelColumn]?.toString() ?? '';
@@ -70,6 +90,7 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
         return;
       }
       final results = <_SourceResult>[];
+      final allExtras = ChecklistService.extras(list.id);
       for (final set in list.sources) {
         final r = _SourceResult(set);
         final problem = RuleEngine.validate(set);
@@ -80,6 +101,10 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
             r.rows = RuleEngine.matchingRows(set);
             final ids = {for (final row in r.rows) row[ruleRowIdKey] as int};
             r.checked = ChecklistService.syncChecks(list.id, set.table, ids);
+            r.extras = [
+              for (final x in allExtras)
+                if (x.table == set.table) x,
+            ];
           } catch (e) {
             r.error = e.toString();
           }
@@ -133,6 +158,99 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
     }
   }
 
+  // --- Entries typed in by hand --------------------------------
+
+  void _toggleExtra(ExtraItem x, bool checked) {
+    try {
+      ChecklistService.setExtraChecked(x.id, checked);
+      _load();
+    } catch (e) {
+      _showError(e);
+    }
+  }
+
+  Future<_SourceResult?> _pickSource(List<_SourceResult> sources) {
+    return showModalBottomSheet<_SourceResult>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text('In welche Tabelle soll der Eintrag?'),
+            ),
+            for (final r in sources)
+              ListTile(
+                leading: const Icon(Icons.table_chart_outlined),
+                title: Text(r.set.table),
+                onTap: () => Navigator.pop(context, r),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Plus button: a new entry for one of the linked tables.
+  Future<void> _addExtra() async {
+    final valid = [
+      for (final r in _results)
+        if (r.error == null) r,
+    ];
+    if (valid.isEmpty) {
+      _showError('Es ist keine gültige Tabelle verknüpft.');
+      return;
+    }
+    final target = valid.length == 1 ? valid.first : await _pickSource(valid);
+    if (target == null || !mounted) return;
+    await _editExtra(target, null);
+  }
+
+  /// Add ([x] == null) or edit a hand-typed entry.
+  Future<void> _editExtra(_SourceResult r, ExtraItem? x) async {
+    try {
+      // The fields: title, unique and group column, shown columns and
+      // the columns of the rules - in this order.
+      final kinds = {
+        for (final c in RuleEngine.columnsOf(r.set.table)) c.name: c.kind,
+      };
+      final fields = [
+        for (final name in r.set.entryColumns)
+          if (kinds.containsKey(name)) RuleColumn(name, kinds[name]!),
+      ];
+      final result = await showDialog<_ExtraResult>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => _ExtraDialog(
+          titleColumn: r.set.labelColumn,
+          columns: fields,
+          initial: x?.cells,
+        ),
+      );
+      if (result == null || !mounted) return;
+      final cells = result.cells;
+      if (result.delete) {
+        if (x != null) ChecklistService.deleteExtras([x.id]);
+      } else if (cells != null) {
+        if (x == null) {
+          ChecklistService.addExtra(widget.checklistId, r.set.table, cells);
+        } else {
+          ChecklistService.updateExtra(x.id, cells);
+        }
+      }
+      _load();
+    } catch (e) {
+      _showError(e);
+    }
+  }
+
+  String _extraLabel(RuleSet set, ExtraItem x) {
+    final v = x.cells[set.labelColumn] ?? '';
+    return v.isEmpty ? '(leer)' : v;
+  }
+
   Future<void> _editRules() async {
     final list = _list;
     if (list == null) return;
@@ -163,37 +281,78 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
         final id = row[ruleRowIdKey] as int;
         if (!r.checked.contains(id)) continue;
         final g = r.set.groupColumn;
+        final u = r.set.uniqueColumn;
         items.add(_AddItem(
           rowId: id,
           label: _labelOf(r.set, row),
           group: g == null ? null : row[g]?.toString(),
+          uniqueValue: u == null ? null : row[u]?.toString(),
         ));
       }
       inputs.add(_AddInput(r.set, items));
     }
-    if (inputs.isEmpty) return;
 
-    final changes = await Navigator.of(context).push<List<_SourceChanges>>(
-      MaterialPageRoute(builder: (_) => _AddToTableScreen(inputs: inputs)),
+    // Ticked hand-typed entries are added as they are.
+    final extraCount = _results.fold<int>(
+      0,
+      (n, r) => n + (r.error != null ? 0 : r.extras.where((x) => x.checked).length),
     );
-    if (changes == null || !mounted) return;
+    if (inputs.isEmpty && extraCount == 0) return;
+
+    var changes = <_SourceChanges>[];
+    if (inputs.isNotEmpty) {
+      final entered = await Navigator.of(context).push<List<_SourceChanges>>(
+        MaterialPageRoute(
+          builder: (_) => _AddToTableScreen(
+            inputs: inputs,
+            allowEmpty: extraCount > 0,
+          ),
+        ),
+      );
+      if (entered == null || !mounted) return;
+      changes = entered;
+    }
 
     try {
       var updated = 0;
       for (final change in changes) {
-        updated += RuleEngine.applyChanges(change.table, change.rows);
+        updated += RuleEngine.applyChanges(
+          change.set.table,
+          change.rows,
+          uniqueColumn: change.set.uniqueColumn,
+          numberColumns: change.set.numberColumns,
+        );
         // Done: take the ticks away from the rows that were updated.
         // Rows that still match the rules show up again, unticked.
         ChecklistService.clearChecks(
           widget.checklistId,
-          change.table,
+          change.set.table,
           [for (final c in change.rows) c.rowId],
         );
       }
+
+      var added = 0;
+      for (final r in _results) {
+        if (r.error != null) continue;
+        final ticked = [
+          for (final x in r.extras)
+            if (x.checked) x,
+        ];
+        if (ticked.isEmpty) continue;
+        added += RuleEngine.addEntries(r.set, [for (final x in ticked) x.cells]);
+        ChecklistService.deleteExtras([for (final x in ticked) x.id]);
+      }
+
       _load();
       if (mounted) {
+        final parts = [
+          if (updated > 0) '$updated Einträge in den Tabellen aktualisiert',
+          if (added > 0) '$added neue Einträge in die Tabellen eingetragen',
+        ];
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$updated Einträge in den Tabellen aktualisiert')),
+          SnackBar(
+            content: Text(parts.isEmpty ? 'Nichts geändert' : parts.join(' · ')),
+          ),
         );
       }
     } catch (e) {
@@ -221,13 +380,20 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
         entries.add(_Entry(_EntryKind.message, r, text: r.error, isError: true));
         continue;
       }
-      if (r.rows.isEmpty) {
+      if (r.rows.isEmpty && r.extras.isEmpty) {
         entries.add(_Entry(
           _EntryKind.message,
           r,
           text: 'Nichts zu tun - keine Regel trifft zu.',
         ));
         continue;
+      }
+      if (r.rows.isEmpty) {
+        entries.add(_Entry(
+          _EntryKind.message,
+          r,
+          text: 'Keine Regel trifft zu.',
+        ));
       }
       if (r.set.shownColumns.isNotEmpty) {
         entries.add(_Entry(_EntryKind.columns, r));
@@ -249,6 +415,12 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
           }
         }
         entries.add(_Entry(_EntryKind.item, r, row: row));
+      }
+      if (r.extras.isNotEmpty) {
+        entries.add(_Entry(_EntryKind.extraHeader, r));
+        for (final x in r.extras) {
+          entries.add(_Entry(_EntryKind.extra, r, extra: x));
+        }
       }
     }
     return entries;
@@ -341,6 +513,7 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
         final row = e.row!;
         final id = row[ruleRowIdKey] as int;
         final checked = r.checked.contains(id);
+        final merged = (row[ruleCountKey] as int?) ?? 1;
         return InkWell(
           onTap: () => _toggle(r, id, !checked),
           child: Padding(
@@ -353,7 +526,18 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
               ),
               title: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 10),
-                child: Text(_labelOf(r.set, row)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(_labelOf(r.set, row)),
+                    if (merged > 1)
+                      Text(
+                        '$merged Zeilen zusammengefasst',
+                        style: textTheme.bodySmall
+                            ?.copyWith(color: scheme.onSurfaceVariant),
+                      ),
+                  ],
+                ),
               ),
               cell: (c) => Padding(
                 padding: const EdgeInsets.symmetric(vertical: 10),
@@ -364,6 +548,57 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
                   style: TextStyle(color: scheme.onSurfaceVariant),
                 ),
               ),
+            ),
+          ),
+        );
+
+      case _EntryKind.extraHeader:
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Eigene Einträge',
+                style: textTheme.titleMedium?.copyWith(color: scheme.primary),
+              ),
+              Text(
+                'Abgehakt kommen sie mit "Zur Tabelle hinzufügen" in die Tabelle.',
+                style: textTheme.bodySmall,
+              ),
+              const Divider(height: 8),
+            ],
+          ),
+        );
+
+      case _EntryKind.extra:
+        final x = e.extra!;
+        return InkWell(
+          onTap: () => _editExtra(r, x),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 8, right: 16),
+            child: _columnsRow(
+              r,
+              leading: Checkbox(
+                value: x.checked,
+                onChanged: (v) => _toggleExtra(x, v ?? false),
+              ),
+              title: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                child: Text(_extraLabel(r.set, x)),
+              ),
+              cell: (c) {
+                final v = x.cells[c] ?? '';
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  child: Text(
+                    v.isEmpty ? '–' : v,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: scheme.onSurfaceVariant),
+                  ),
+                );
+              },
             ),
           ),
         );
@@ -389,7 +624,10 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
     }
 
     final entries = _buildEntries();
-    final checkedCount = _results.fold<int>(0, (n, r) => n + r.checked.length);
+    final checkedCount = _results.fold<int>(
+      0,
+      (n, r) => n + r.checked.length + r.extras.where((x) => x.checked).length,
+    );
 
     return Scaffold(
       appBar: AppBar(
@@ -407,17 +645,33 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
           ),
         ],
       ),
-      floatingActionButton: checkedCount > 0
-          ? FloatingActionButton.extended(
+      // heroTag: null - two floating buttons would otherwise share the
+      // default hero tag and break page transitions.
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (checkedCount > 0) ...[
+            FloatingActionButton.extended(
+              heroTag: null,
               onPressed: _addToTable,
               icon: const Icon(Icons.playlist_add),
               label: Text('Zur Tabelle hinzufügen ($checkedCount)'),
-            )
-          : null,
+            ),
+            const SizedBox(height: 12),
+          ],
+          FloatingActionButton(
+            heroTag: null,
+            tooltip: 'Eintrag hinzufügen',
+            onPressed: _addExtra,
+            child: const Icon(Icons.add),
+          ),
+        ],
+      ),
       body: entries.isEmpty
           ? const Center(child: Text('Keine Tabellen verknüpft.'))
           : ListView.builder(
-              padding: const EdgeInsets.only(bottom: 88),
+              padding: const EdgeInsets.only(bottom: 160),
               itemCount: entries.length,
               itemBuilder: (context, i) => _buildEntry(entries[i]),
             ),
@@ -431,11 +685,19 @@ class _RuleChecklistScreenState extends State<RuleChecklistScreen> {
 
 /// One ticked row.
 class _AddItem {
-  const _AddItem({required this.rowId, required this.label, this.group});
+  const _AddItem({
+    required this.rowId,
+    required this.label,
+    this.group,
+    this.uniqueValue,
+  });
 
   final int rowId;
   final String label;
   final String? group;
+
+  /// Value of the unique column (only with a unique column).
+  final String? uniqueValue;
 }
 
 /// A table with its ticked rows.
@@ -463,9 +725,9 @@ class _AddInput {
 
 /// The new values for the ticked rows of one table.
 class _SourceChanges {
-  const _SourceChanges(this.table, this.rows);
+  const _SourceChanges(this.set, this.rows);
 
-  final String table;
+  final RuleSet set;
   final List<RowChange> rows;
 }
 
@@ -482,9 +744,13 @@ class _DateDraft {
 }
 
 class _AddToTableScreen extends StatefulWidget {
-  const _AddToTableScreen({required this.inputs});
+  const _AddToTableScreen({required this.inputs, this.allowEmpty = false});
 
   final List<_AddInput> inputs;
+
+  /// True if hand-typed entries are added anyway, so it is fine to
+  /// hand in no new value at all.
+  final bool allowEmpty;
 
   @override
   State<_AddToTableScreen> createState() => _AddToTableScreenState();
@@ -611,13 +877,14 @@ class _AddToTableScreenState extends State<_AddToTableScreen> {
           rowId: item.rowId,
           numbers: numbers,
           dates: dates,
+          uniqueValue: item.uniqueValue,
         );
         if (!change.isEmpty) rows.add(change);
       }
-      if (rows.isNotEmpty) out.add(_SourceChanges(inp.set.table, rows));
+      if (rows.isNotEmpty) out.add(_SourceChanges(inp.set, rows));
     }
 
-    if (out.isEmpty) {
+    if (out.isEmpty && !widget.allowEmpty) {
       _fail('Bitte für mindestens einen Eintrag einen neuen Wert angeben.');
       return;
     }
@@ -774,6 +1041,17 @@ class _AddToTableScreenState extends State<_AddToTableScreen> {
               '${widget.inputs[i].items.length == 1 ? 'Eintrag' : 'Einträge'}',
               style: textTheme.titleMedium,
             ),
+            if (widget.inputs[i].set.uniqueColumn != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'Zusammengefasst nach "${widget.inputs[i].set.uniqueColumn}". '
+                  'Ein anderes Datum legt eine Kopie der Zeile mit dem neuen '
+                  'Datum und dem Wert an, bei gleichem Datum wird die '
+                  'bestehende Zeile geändert.',
+                  style: textTheme.bodySmall,
+                ),
+              ),
             if (!widget.inputs[i].hasFields)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -798,6 +1076,196 @@ class _AddToTableScreenState extends State<_AddToTableScreen> {
           ],
         ],
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------
+// Dialog for an entry typed in by hand
+// ---------------------------------------------------------------
+
+/// One field per column (text, number, date or yes/no switch).
+/// Saves the values as text: dates ISO, yes/no as '1' / '0'.
+class _ExtraDialog extends StatefulWidget {
+  const _ExtraDialog({
+    required this.titleColumn,
+    required this.columns,
+    this.initial,
+  });
+
+  /// Must be filled in.
+  final String? titleColumn;
+  final List<RuleColumn> columns;
+  final Map<String, String>? initial;
+
+  @override
+  State<_ExtraDialog> createState() => _ExtraDialogState();
+}
+
+class _ExtraDialogState extends State<_ExtraDialog> {
+  late final Map<String, TextEditingController> _ctrls = {
+    for (final c in widget.columns)
+      if (c.kind == RuleKind.text || c.kind == RuleKind.number)
+        c.name: TextEditingController(text: widget.initial?[c.name] ?? ''),
+  };
+  late final Map<String, DateTime?> _dates = {
+    for (final c in widget.columns)
+      if (c.kind == RuleKind.date)
+        c.name: DateTime.tryParse(widget.initial?[c.name] ?? ''),
+  };
+  late final Map<String, bool> _bools = {
+    for (final c in widget.columns)
+      if (c.kind == RuleKind.boolean) c.name: widget.initial?[c.name] == '1',
+  };
+  String? _error;
+
+  @override
+  void dispose() {
+    for (final c in _ctrls.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _pickDate(String column) async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _dates[column] ?? DateTime.now(),
+      firstDate: DateTime(1900),
+      lastDate: DateTime(2100),
+    );
+    if (picked != null && mounted) setState(() => _dates[column] = picked);
+  }
+
+  void _save() {
+    final cells = <String, String>{};
+    for (final c in widget.columns) {
+      switch (c.kind) {
+        case RuleKind.text:
+          cells[c.name] = _ctrls[c.name]!.text.trim();
+        case RuleKind.number:
+          {
+            final t = _ctrls[c.name]!.text.trim();
+            if (t.isNotEmpty && num.tryParse(t.replaceAll(',', '.')) == null) {
+              setState(() => _error = '"$t" ist keine Zahl (${c.name}).');
+              return;
+            }
+            cells[c.name] = t;
+          }
+        case RuleKind.date:
+          {
+            final d = _dates[c.name];
+            cells[c.name] = d == null ? '' : formatIsoDate(d);
+          }
+        case RuleKind.boolean:
+          cells[c.name] = (_bools[c.name] ?? false) ? '1' : '0';
+      }
+    }
+    final title = widget.titleColumn;
+    if (title != null && (cells[title] ?? '').isEmpty) {
+      setState(() => _error = 'Bitte "$title" ausfüllen.');
+      return;
+    }
+    Navigator.pop(context, (cells: cells, delete: false));
+  }
+
+  Widget _field(RuleColumn c, int i) {
+    switch (c.kind) {
+      case RuleKind.text:
+      case RuleKind.number:
+        return TextField(
+          controller: _ctrls[c.name],
+          autofocus: i == 0,
+          keyboardType: c.kind == RuleKind.number
+              ? const TextInputType.numberWithOptions(decimal: true, signed: true)
+              : null,
+          decoration: InputDecoration(
+            labelText: c.name,
+            isDense: true,
+            border: const OutlineInputBorder(),
+          ),
+        );
+      case RuleKind.date:
+        {
+          final d = _dates[c.name];
+          return Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => _pickDate(c.name),
+                  icon: const Icon(Icons.calendar_month),
+                  label: Text(
+                    d == null
+                        ? '${c.name}: Datum wählen'
+                        : '${c.name}: ${formatIsoDate(d)}',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+              if (d != null)
+                IconButton(
+                  tooltip: 'Datum entfernen',
+                  icon: const Icon(Icons.close),
+                  onPressed: () => setState(() => _dates[c.name] = null),
+                ),
+            ],
+          );
+        }
+      case RuleKind.boolean:
+        return SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text(c.name),
+          value: _bools[c.name] ?? false,
+          onChanged: (v) => setState(() => _bools[c.name] = v),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(
+        widget.initial == null ? 'Neuer Eintrag' : 'Eintrag bearbeiten',
+      ),
+      content: SizedBox(
+        width: 400,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < widget.columns.length; i++)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: _field(widget.columns[i], i),
+                ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    _error!,
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        if (widget.initial != null)
+          TextButton(
+            onPressed: () =>
+                Navigator.pop(context, (cells: null, delete: true)),
+            child: const Text('Löschen'),
+          ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Abbrechen'),
+        ),
+        FilledButton(
+          onPressed: _save,
+          child: const Text('Speichern'),
+        ),
+      ],
     );
   }
 }

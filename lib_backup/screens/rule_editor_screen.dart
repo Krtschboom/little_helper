@@ -45,6 +45,9 @@ class _SourceDraft {
   String? table;
   String? label;
   String? group;
+
+  /// "Unique" column: rows with the same value become ONE entry.
+  String? unique;
   final List<String> display = [];
   List<RuleColumn> columns = [];
   final List<_CondDraft> conds = [];
@@ -105,7 +108,8 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
     final src = _SourceDraft()
       ..table = set.table
       ..label = set.labelColumn
-      ..group = set.groupColumn;
+      ..group = set.groupColumn
+      ..unique = set.uniqueColumn;
     src.display.addAll(set.displayColumns);
     try {
       src.columns = RuleEngine.columnsOf(set.table);
@@ -208,6 +212,7 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
       }
       s.label = label ?? (s.columns.isEmpty ? null : s.columns.first.name);
       s.group = null;
+      s.unique = null;
       s.display.clear();
       if (s.columns.isNotEmpty) s.conds.add(_newCond(s));
     });
@@ -249,6 +254,7 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
         table: table,
         labelColumn: s.label,
         groupColumn: s.group,
+        uniqueColumn: s.unique,
         displayColumns: List.of(s.display),
         conditions: [for (final d in s.conds) _toCondition(d)],
       );
@@ -467,6 +473,28 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
                   s.display.remove(s.group);
                 }),
               ),
+              const SizedBox(height: 8),
+              LabeledDropdown<String>(
+                label: 'Zusammenfassen nach (eindeutig)',
+                value: s.unique ?? '',
+                items: {
+                  '': 'Nicht zusammenfassen',
+                  for (final c in s.columns) c.name: c.name,
+                },
+                onChanged: (v) => setState(() => s.unique = v.isEmpty ? null : v),
+              ),
+              if (s.unique != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    'Zeilen mit gleichem "${s.unique}" sind ein einziger Eintrag. '
+                    'Zahlen aus den Regeln werden addiert, bei Datums-Regeln '
+                    'zählt das früheste Datum. Trägst du später ein anderes '
+                    'Datum ein, wird eine Kopie der Zeile mit dem neuen Datum '
+                    'angelegt.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
               const SizedBox(height: 12),
               Text(
                 'Weitere angezeigte Spalten',

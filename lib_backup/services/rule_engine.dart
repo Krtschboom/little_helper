@@ -27,6 +27,10 @@ import 'db_service.dart';
 /// Name of the extra key that carries SQLite's rowid in result rows.
 const ruleRowIdKey = '__rid';
 
+/// Extra key in result rows of a rule set with a unique column: how
+/// many table rows were merged into this one entry.
+const ruleCountKey = '__cnt';
+
 /// Formats a date the way dates are stored in the database (ISO, TEXT).
 String formatIsoDate(DateTime d) =>
     '${d.year.toString().padLeft(4, '0')}-'
@@ -186,6 +190,7 @@ class RuleSet {
     required this.table,
     this.labelColumn,
     this.groupColumn,
+    this.uniqueColumn,
     List<String>? displayColumns,
     List<RuleCondition>? conditions,
   })  : displayColumns = displayColumns ?? [],
@@ -197,6 +202,12 @@ class RuleSet {
   /// Optional: rows with the same value in this column are listed
   /// together under a header (e.g. the supermarket).
   String? groupColumn;
+
+  /// Optional "unique" column (e.g. the name): all rows with the same
+  /// value are merged into ONE entry. The rules then look at the
+  /// merged values: number columns are added up, for date columns the
+  /// earliest date counts.
+  String? uniqueColumn;
 
   /// Extra columns shown next to the title (e.g. price, quantity).
   List<String> displayColumns;
@@ -224,10 +235,51 @@ class RuleSet {
     return result;
   }
 
+  /// Number columns the rules compare (the ones that can be changed
+  /// when something is added to the table).
+  List<String> get numberColumns => {
+        for (final c in conditions)
+          if (c.op.kind == RuleKind.number) c.column,
+      }.toList();
+
+  /// Date columns the rules look at.
+  List<String> get dateColumns => {
+        for (final c in conditions)
+          if (c.op.kind == RuleKind.date) c.column,
+      }.toList();
+
+  /// Number columns that are only the RIGHT side of a comparison
+  /// ("stock < minimum"): they are a threshold, not an amount.
+  List<String> get thresholdColumns {
+    final left = numberColumns;
+    return {
+      for (final c in conditions)
+        if (c.otherColumn != null && !left.contains(c.otherColumn)) c.otherColumn!,
+    }.toList();
+  }
+
+  /// The columns the user can fill in when adding an entry by hand:
+  /// title, unique and group column, the shown columns and the
+  /// columns of the rules (so merging by date works).
+  List<String> get entryColumns {
+    final result = <String>[];
+    void add(String? c) {
+      if (c != null && !result.contains(c)) result.add(c);
+    }
+
+    add(labelColumn);
+    add(uniqueColumn);
+    add(groupColumn);
+    shownColumns.forEach(add);
+    usedColumns.forEach(add);
+    return result;
+  }
+
   Map<String, Object?> toJson() => {
         'table': table,
         'labelColumn': labelColumn,
         'groupColumn': groupColumn,
+        'uniqueColumn': uniqueColumn,
         'displayColumns': displayColumns,
         'conditions': [for (final c in conditions) c.toJson()],
       };
@@ -236,6 +288,7 @@ class RuleSet {
         table: j['table'] as String,
         labelColumn: j['labelColumn'] as String?,
         groupColumn: j['groupColumn'] as String?,
+        uniqueColumn: j['uniqueColumn'] as String?,
         displayColumns: [
           for (final c in (j['displayColumns'] as List? ?? const [])) c as String,
         ],
@@ -260,10 +313,16 @@ class RowChange {
     required this.rowId,
     this.numbers = const {},
     this.dates = const {},
+    this.uniqueValue,
   });
 
   /// SQLite rowid of the row.
   final int rowId;
+
+  /// Value of the unique column of the entry (only for rule sets with
+  /// a unique column). Then NOT just this row is changed: the rows with
+  /// the same value are looked at (see [RuleEngine.applyChanges]).
+  final String? uniqueValue;
 
   /// Number column -> set / increase.
   final Map<String, NumberChange> numbers;
@@ -333,6 +392,10 @@ class RuleEngine {
     if (group != null && !names.contains(group)) {
       return 'Die Spalte "$group" (Überschrift) existiert nicht mehr.';
     }
+    final unique = set.uniqueColumn;
+    if (unique != null && !names.contains(unique)) {
+      return 'Die Spalte "$unique" (Zusammenfassen) existiert nicht mehr.';
+    }
     for (final c in set.displayColumns) {
       if (!names.contains(c)) return 'Die angezeigte Spalte "$c" existiert nicht mehr.';
     }
@@ -377,6 +440,13 @@ class RuleEngine {
 
   /// All rows of the table for which the rules apply. Every row map
   /// also holds the rowid under [ruleRowIdKey].
+  ///
+  /// With a [RuleSet.uniqueColumn] the rows with the same value there
+  /// are merged first: one result per value, holding the SUM of the
+  /// number columns of the rules and the EARLIEST date of the date
+  /// columns of the rules (all other columns come from the first row
+  /// of the group). The rowid is then the one of that first row and
+  /// [ruleCountKey] says how many rows were merged.
   static List<Map<String, Object?>> matchingRows(RuleSet set) {
     final where = whereOf(set);
     final label = set.labelColumn;
@@ -389,13 +459,62 @@ class RuleEngine {
       if (label != null) '${DbService.quoteIdentifier(label)} COLLATE NOCASE',
     ];
     final order = orderParts.isEmpty ? '' : ' ORDER BY ${orderParts.join(', ')}';
+
+    final unique = set.uniqueColumn;
+    final source = unique == null
+        ? 'SELECT rowid AS $ruleRowIdKey, * '
+            'FROM ${DbService.quoteIdentifier(set.table)}'
+        : _mergedSql(set, unique);
+
     final result = _db.select(
-      'SELECT rowid AS $ruleRowIdKey, * '
-      'FROM ${DbService.quoteIdentifier(set.table)} '
-      'WHERE ${where.sql}$order',
+      'SELECT * FROM ($source) WHERE ${where.sql}$order',
       where.args,
     );
     return [for (final r in result) Map<String, Object?>.from(r)];
+  }
+
+  /// SQL for "one row per value of [unique]": the first row of every
+  /// group, with the rule columns replaced by their merged values.
+  static String _mergedSql(RuleSet set, String unique) {
+    const q = DbService.quoteIdentifier;
+    final aggregates = <String>[];
+    final alias = <String, String>{}; // column -> alias of its merged value
+
+    void aggregate(String column, String expression) {
+      final name = '"__a${aggregates.length}"';
+      aggregates.add('$expression AS $name');
+      alias[column] = name;
+    }
+
+    // An empty (NULL) number counts as 0, like in the rules.
+    for (final c in set.numberColumns) {
+      aggregate(c, 'SUM(COALESCE(${q(c)}, 0))');
+    }
+    for (final c in set.dateColumns) {
+      aggregate(c, 'MIN(${q(c)})');
+    }
+    // "stock < minimum": the minimum is a threshold, it is not added up.
+    for (final c in set.thresholdColumns) {
+      aggregate(c, 'MAX(COALESCE(${q(c)}, 0))');
+    }
+
+    final columns = <String>[];
+    for (final c in columnsOf(set.table)) {
+      final merged = alias[c.name];
+      final value = merged != null ? 'g.$merged' : 't.${q(c.name)}';
+      columns.add('$value AS ${q(c.name)}');
+    }
+    final groupParts = [
+      'MIN(rowid) AS __first',
+      'COUNT(*) AS __count',
+      ...aggregates,
+    ];
+    return 'SELECT t.rowid AS $ruleRowIdKey, ${columns.join(', ')}, '
+        'g.__count AS $ruleCountKey '
+        'FROM ${q(set.table)} AS t JOIN ('
+        'SELECT ${groupParts.join(', ')} FROM ${q(set.table)} '
+        'GROUP BY ${q(unique)} COLLATE NOCASE'
+        ') AS g ON t.rowid = g.__first';
   }
 
   static String _escapeLike(String s) => s
@@ -486,32 +605,45 @@ class RuleEngine {
 
   // --- Changing rows ------------------------------------------
 
-  /// Writes new values into single rows of [table]: every [RowChange]
-  /// has its own numbers (set / increase) and dates. All or nothing.
-  /// Returns the number of rows that were updated.
-  static int applyChanges(String table, List<RowChange> changes) {
+  /// Writes new values into the table: every [RowChange] has its own
+  /// numbers (set / increase) and dates. All or nothing.
+  /// Returns the number of entries that were changed.
+  ///
+  /// Normal case: the row with [RowChange.rowId] is updated.
+  ///
+  /// With [uniqueColumn] (and a [RowChange.uniqueValue]) the entry is a
+  /// group of rows with the same value in that column:
+  ///  * new dates given and a row of the group already has exactly these
+  ///    dates -> the numbers go into that row;
+  ///  * new dates given, but no row has them -> the newest row of the
+  ///    group is COPIED, with the new dates and the new numbers (the
+  ///    number columns of the rules start at 0 in the copy);
+  ///  * no dates given -> the numbers go into the newest row of the group.
+  static int applyChanges(
+    String table,
+    List<RowChange> changes, {
+    String? uniqueColumn,
+    List<String> numberColumns = const [],
+  }) {
     final db = _db;
     var count = 0;
     db.execute('BEGIN');
     try {
       for (final change in changes) {
         if (change.isEmpty) continue;
-        final sets = <String>[];
-        final args = <Object?>[];
-        change.numbers.forEach((column, n) {
-          final col = DbService.quoteIdentifier(column);
-          sets.add(n.add ? '$col = COALESCE($col, 0) + ?' : '$col = ?');
-          args.add(n.value);
-        });
-        change.dates.forEach((column, iso) {
-          sets.add('${DbService.quoteIdentifier(column)} = ?');
-          args.add(iso);
-        });
-        db.execute(
-          'UPDATE ${DbService.quoteIdentifier(table)} '
-          'SET ${sets.join(', ')} WHERE rowid = ?',
-          [...args, change.rowId],
-        );
+        final unique = change.uniqueValue;
+        if (uniqueColumn != null && unique != null) {
+          _upsertInGroup(
+            table,
+            uniqueColumn,
+            unique,
+            numbers: change.numbers,
+            dates: change.dates,
+            numberColumns: numberColumns,
+          );
+        } else {
+          _updateRow(table, change.rowId, change.numbers, change.dates);
+        }
         count++;
       }
       db.execute('COMMIT');
@@ -520,5 +652,216 @@ class RuleEngine {
       rethrow;
     }
     return count;
+  }
+
+  /// Adds entries that were typed in by hand to the table of [set].
+  /// Every entry maps column -> text as typed (dates as ISO text,
+  /// booleans as '1' / '0'; empty texts are ignored). Without a unique
+  /// column every entry becomes a new row. With one, an entry is merged
+  /// like in [applyChanges]: same value + same date -> the numbers are
+  /// added to that row, same value + other date -> copy of the newest
+  /// row, new value -> new row. All or nothing; returns the count.
+  static int addEntries(RuleSet set, List<Map<String, String>> entries) {
+    final kinds = {for (final c in columnsOf(set.table)) c.name: c.kind};
+    final unique = set.uniqueColumn;
+    final db = _db;
+    var count = 0;
+    db.execute('BEGIN');
+    try {
+      for (final entry in entries) {
+        final typed = <String, Object?>{};
+        for (final e in entry.entries) {
+          final kind = kinds[e.key];
+          final text = e.value.trim();
+          if (kind == null || text.isEmpty) continue;
+          switch (kind) {
+            case RuleKind.number:
+              {
+                final n = num.tryParse(text.replaceAll(',', '.'));
+                if (n != null) typed[e.key] = n;
+              }
+            case RuleKind.boolean:
+              typed[e.key] = (text == '1' || text.toLowerCase() == 'ja') ? 1 : 0;
+            case RuleKind.date:
+            case RuleKind.text:
+              typed[e.key] = text;
+          }
+        }
+        if (typed.isEmpty) continue;
+
+        final uniqueValue = unique == null ? null : typed[unique]?.toString();
+        if (unique != null && uniqueValue != null) {
+          final numbers = <String, NumberChange>{};
+          final dates = <String, String>{};
+          final extra = Map<String, Object?>.of(typed)..remove(unique);
+          for (final c in set.numberColumns) {
+            final v = typed[c];
+            if (v is num) {
+              numbers[c] = NumberChange(add: true, value: v);
+              extra.remove(c);
+            }
+          }
+          for (final c in set.dateColumns) {
+            final v = typed[c];
+            if (v is String) {
+              dates[c] = v;
+              extra.remove(c);
+            }
+          }
+          _upsertInGroup(
+            set.table,
+            unique,
+            uniqueValue,
+            numbers: numbers,
+            dates: dates,
+            extra: extra,
+            numberColumns: set.numberColumns,
+          );
+        } else {
+          _insertRow(set.table, typed);
+        }
+        count++;
+      }
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
+    return count;
+  }
+
+  /// UPDATE of one row by rowid.
+  static void _updateRow(
+    String table,
+    int rowId,
+    Map<String, NumberChange> numbers,
+    Map<String, String> dates,
+  ) {
+    final sets = <String>[];
+    final args = <Object?>[];
+    numbers.forEach((column, n) {
+      final col = DbService.quoteIdentifier(column);
+      sets.add(n.add ? '$col = COALESCE($col, 0) + ?' : '$col = ?');
+      args.add(n.value);
+    });
+    dates.forEach((column, iso) {
+      sets.add('${DbService.quoteIdentifier(column)} = ?');
+      args.add(iso);
+    });
+    if (sets.isEmpty) return;
+    _db.execute(
+      'UPDATE ${DbService.quoteIdentifier(table)} '
+      'SET ${sets.join(', ')} WHERE rowid = ?',
+      [...args, rowId],
+    );
+  }
+
+  /// INSERT of a new row. Primary key columns are left to SQLite;
+  /// NOT NULL columns without a value get 0 / '' so the insert works.
+  static void _insertRow(String table, Map<String, Object?> values) {
+    const q = DbService.quoteIdentifier;
+    final info = _db.select('PRAGMA table_info(${q(table)})');
+    final names = <String>[];
+    final args = <Object?>[];
+    for (final c in info) {
+      if ((c['pk'] as int) > 0) continue;
+      final name = c['name'] as String;
+      if (values.containsKey(name)) {
+        names.add(name);
+        args.add(values[name]);
+      } else if ((c['notnull'] as int) != 0 && c['dflt_value'] == null) {
+        final declared = ((c['type'] as String?) ?? '').toUpperCase();
+        names.add(name);
+        args.add(kindOfAppType(declared) == RuleKind.number ? 0 : '');
+      }
+    }
+    if (names.isEmpty) {
+      _db.execute('INSERT INTO ${q(table)} DEFAULT VALUES');
+      return;
+    }
+    _db.execute(
+      'INSERT INTO ${q(table)} (${names.map(q).join(', ')}) '
+      'VALUES (${List.filled(names.length, '?').join(', ')})',
+      args,
+    );
+  }
+
+  /// The rows of [table] whose [uniqueColumn] equals [value]
+  /// (ignoring upper/lower case), oldest first.
+  static List<Map<String, Object?>> _groupRows(
+    String table,
+    String uniqueColumn,
+    String value,
+  ) {
+    final result = _db.select(
+      'SELECT rowid AS $ruleRowIdKey, * '
+      'FROM ${DbService.quoteIdentifier(table)} '
+      'WHERE ${DbService.quoteIdentifier(uniqueColumn)} = ? COLLATE NOCASE '
+      'ORDER BY rowid',
+      [value],
+    );
+    return [for (final r in result) Map<String, Object?>.from(r)];
+  }
+
+  /// Applies [numbers] / [dates] to the group of rows with the same
+  /// [uniqueValue] (see [applyChanges] for the three cases). Without
+  /// any row of that value a new row is inserted ([extra] = further
+  /// column values for it).
+  static void _upsertInGroup(
+    String table,
+    String uniqueColumn,
+    String uniqueValue, {
+    required Map<String, NumberChange> numbers,
+    required Map<String, String> dates,
+    Map<String, Object?> extra = const {},
+    List<String> numberColumns = const [],
+  }) {
+    final rows = _groupRows(table, uniqueColumn, uniqueValue);
+
+    // Nothing with this value yet: a completely new row.
+    if (rows.isEmpty) {
+      final values = <String, Object?>{
+        ...extra,
+        uniqueColumn: uniqueValue,
+        ...dates,
+      };
+      numbers.forEach((c, n) => values[c] = n.value);
+      _insertRow(table, values);
+      return;
+    }
+
+    // Which existing row takes the numbers?
+    Map<String, Object?>? target;
+    if (dates.isEmpty) {
+      target = rows.last; // no date given: the newest row
+    } else {
+      for (final r in rows) {
+        final sameDates = dates.entries.every(
+          (e) => (r[e.key]?.toString() ?? '').startsWith(e.value),
+        );
+        if (sameDates) {
+          target = r;
+          break;
+        }
+      }
+    }
+    if (target != null) {
+      _updateRow(table, target[ruleRowIdKey] as int, numbers, const {});
+      return;
+    }
+
+    // Same value, but another date: copy the newest row with the new
+    // date(s) and the new numbers.
+    final copy = <String, Object?>{
+      for (final e in rows.last.entries)
+        if (e.key != ruleRowIdKey) e.key: e.value,
+    };
+    for (final c in numberColumns) {
+      if (copy.containsKey(c)) copy[c] = 0; // a new batch starts empty
+    }
+    numbers.forEach((c, n) => copy[c] = n.value);
+    copy.addAll(dates);
+    copy.addAll(extra);
+    _insertRow(table, copy);
   }
 }
