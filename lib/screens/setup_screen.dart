@@ -24,24 +24,45 @@ class _SetupScreenState extends State<SetupScreen> {
   Future<void> _openExisting() async {
     setState(() => _busy = true);
     try {
-      final result = await FilePicker.platform.pickFiles(
-        // IMPORTANT: FileType.custom with allowedExtensions is broken
-        // on Linux (the picker returns null / never resolves after a
-        // file is chosen). FileType.any works on all platforms.
+            // IMPORTANT: FileType.custom with allowedExtensions is broken
+      // on Linux (the picker returns null / never resolves after a
+      // file is chosen). FileType.any works on all platforms.
+      final files = await FilePicker.pickFiles(
         type: FileType.any,
-        withData: false,
       );
-      if (result == null) {
-        // User closed the picker without choosing anything.
+
+      // User closed the picker without choosing anything
+      // (v13 returns an empty list instead of null).
+      if (files.isEmpty) {
         return;
       }
-      final path = result.files.isEmpty ? null : result.files.first.path;
+
+      final path = files.first.path;
       if (path == null) {
         _showError('Es konnte kein Dateipfad ermittelt werden.\n'
             'Bitte die Datei erneut auswählen.');
         return;
       }
+
       if (!mounted) return;
+      // final result = await FilePicker.platform.pickFiles(
+      //   // IMPORTANT: FileType.custom with allowedExtensions is broken
+      //   // on Linux (the picker returns null / never resolves after a
+      //   // file is chosen). FileType.any works on all platforms.
+      //   type: FileType.any,
+      //   withData: false,
+      // );
+      // if (result == null) {
+      //   // User closed the picker without choosing anything.
+      //   return;
+      // }
+      // final path = result.files.isEmpty ? null : result.files.first.path;
+      // if (path == null) {
+      //   _showError('Es konnte kein Dateipfad ermittelt werden.\n'
+      //       'Bitte die Datei erneut auswählen.');
+      //   return;
+      // }
+      // if (!mounted) return;
 
       // Plain -> remembered password -> ask the user (shared logic).
       // Returns false if the user cancelled.

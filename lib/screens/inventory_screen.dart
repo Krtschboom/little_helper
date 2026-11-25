@@ -246,19 +246,20 @@ class _InventoryScreenState extends State<InventoryScreen> {
       _showError(e);
     }
   }
-
   /// Imports a CSV file as a new table. The column names are taken
   /// from the header row, the types are auto-detected and can be
   /// adjusted per column before creating the table.
   Future<void> _importCsv() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.any,
-      withData: true, // read the bytes directly (also needed on Linux)
+    final file = await FilePicker.pickFile(
+      type: FileType.any, // FileType.custom is broken on Linux
     );
-    final file = result?.files.single;
-    if (file == null || file.bytes == null) return; // user cancelled
+    if (file == null) return; // user cancelled
 
-    final content = utf8.decode(file.bytes!, allowMalformed: true);
+    // v13 loads content lazily - read the bytes explicitly.
+    final bytes = await file.readAsBytes();
+    if (bytes.isEmpty) return;
+
+    final content = utf8.decode(bytes, allowMalformed: true);
     final delim = _sniffDelimiter(content);
     final rows = _parseCsv(content, delim);
     if (rows.isEmpty) {
@@ -305,8 +306,6 @@ class _InventoryScreenState extends State<InventoryScreen> {
         final placeholders = List.filled(header.length, '?').join(', ');
         final insertSql =
             'INSERT INTO ${_q(definition.name)} VALUES ($placeholders)';
-        // sqlite3's execute() takes no parameters - use a prepared
-        // statement instead.
         final stmt = db.prepare(insertSql);
         try {
           for (final row in dataRows) {
@@ -319,7 +318,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
             ]);
           }
         } finally {
-          stmt.dispose();
+          stmt.close();
         }
         db.execute('COMMIT');
       } catch (_) {
@@ -346,6 +345,105 @@ class _InventoryScreenState extends State<InventoryScreen> {
       _showError(e);
     }
   }
+  /// Imports a CSV file as a new table. The column names are taken
+  /// from the header row, the types are auto-detected and can be
+  /// adjusted per column before creating the table.
+  // Future<void> _importCsv() async {
+  //   final result = await FilePicker.platform.pickFiles(
+  //     type: FileType.any,
+  //     withData: true, // read the bytes directly (also needed on Linux)
+  //   );
+  //   final file = result?.files.single;
+  //   if (file == null || file.bytes == null) return; // user cancelled
+
+  //   final content = utf8.decode(file.bytes!, allowMalformed: true);
+  //   final delim = _sniffDelimiter(content);
+  //   final rows = _parseCsv(content, delim);
+  //   if (rows.isEmpty) {
+  //     _showError('Die CSV-Datei ist leer.');
+  //     return;
+  //   }
+
+  //   final header = rows.first;
+  //   final dataRows = rows.skip(1).toList();
+  //   if (header.isEmpty || header.every((h) => h.trim().isEmpty)) {
+  //     _showError('Die CSV-Datei hat keine gültige Kopfzeile.');
+  //     return;
+  //   }
+
+  //   // Auto-detect a type for every column from its values.
+  //   final types = <String>[];
+  //   for (var i = 0; i < header.length; i++) {
+  //     final values = dataRows
+  //         .map((r) => i < r.length ? r[i].trim() : '')
+  //         .toList();
+  //     types.add(_guessType(values));
+  //   }
+
+  //   if (!mounted) return;
+  //   final definition = await showModalBottomSheet<_TableDef>(
+  //     context: context,
+  //     isScrollControlled: true,
+  //     showDragHandle: true,
+  //     builder: (_) => _CsvImportSheet(
+  //       fileName: file.name,
+  //       header: header,
+  //       guessedTypes: types,
+  //     ),
+  //   );
+  //   if (definition == null) return;
+
+  //   try {
+  //     final db = DbService.instance.database;
+  //     // All-or-nothing: build the table and insert everything inside
+  //     // one transaction.
+  //     db.execute('BEGIN');
+  //     try {
+  //       db.execute(definition.sql);
+  //       final placeholders = List.filled(header.length, '?').join(', ');
+  //       final insertSql =
+  //           'INSERT INTO ${_q(definition.name)} VALUES ($placeholders)';
+  //       // sqlite3's execute() takes no parameters - use a prepared
+  //       // statement instead.
+  //       final stmt = db.prepare(insertSql);
+  //       try {
+  //         for (final row in dataRows) {
+  //           stmt.execute([
+  //             for (var i = 0; i < header.length; i++)
+  //               _convertValue(
+  //                 i < row.length ? row[i].trim() : '',
+  //                 definition.columns[i].type,
+  //               ),
+  //           ]);
+  //         }
+  //       } finally {
+  //         stmt.dispose();
+  //       }
+  //       db.execute('COMMIT');
+  //     } catch (_) {
+  //       db.execute('ROLLBACK');
+  //       rethrow;
+  //     }
+  //     // Remember DATUM/BOOLEAN choices for the date picker / checkbox UI.
+  //     for (final col in definition.columns) {
+  //       DbService.instance
+  //           .recordColumnType(definition.name, col.name, col.type);
+  //     }
+  //     _loadTables();
+  //     if (mounted) {
+  //       ScaffoldMessenger.of(context).showSnackBar(
+  //         SnackBar(
+  //           content: Text(
+  //             '"${definition.name}" importiert '
+  //             '(${dataRows.length} Zeilen)',
+  //           ),
+  //         ),
+  //       );
+  //     }
+  //   } catch (e) {
+  //     _showError(e);
+  //   }
+  // }
 
   /// Guesses the column type from all non-empty values of a column.
   String _guessType(List<String> values) {
@@ -447,7 +545,6 @@ class _InventoryScreenState extends State<InventoryScreen> {
     }
     return rows;
   }
-
   /// Exports the table content as a CSV file via a save-file dialog.
   Future<void> _exportTable(String table) async {
     try {
@@ -457,8 +554,6 @@ class _InventoryScreenState extends State<InventoryScreen> {
           .toList();
       final rows = db.select('SELECT * FROM ${_q(table)}');
 
-      // StringBuffer instead of `csv += ...` (which copies the whole
-      // text for every row).
       final buffer = StringBuffer()
         ..writeln(columns.map(_csvEscape).join(';'));
       for (final row in rows) {
@@ -467,7 +562,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
         );
       }
 
-      final path = await FilePicker.platform.saveFile(
+      final path = await FilePicker.saveFile(
         fileName: '$table.csv',
         // utf8.encode (not codeUnits): umlauts must be written as UTF-8.
         bytes: Uint8List.fromList(utf8.encode(buffer.toString())),
@@ -482,6 +577,40 @@ class _InventoryScreenState extends State<InventoryScreen> {
       _showError(e);
     }
   }
+  /// Exports the table content as a CSV file via a save-file dialog.
+  // Future<void> _exportTable(String table) async {
+  //   try {
+  //     final db = DbService.instance.database;
+  //     final columns = (db.select('PRAGMA table_info(${_q(table)})'))
+  //         .map((c) => c['name'] as String)
+  //         .toList();
+  //     final rows = db.select('SELECT * FROM ${_q(table)}');
+
+  //     // StringBuffer instead of `csv += ...` (which copies the whole
+  //     // text for every row).
+  //     final buffer = StringBuffer()
+  //       ..writeln(columns.map(_csvEscape).join(';'));
+  //     for (final row in rows) {
+  //       buffer.writeln(
+  //         columns.map((c) => _csvEscape(row[c]?.toString())).join(';'),
+  //       );
+  //     }
+
+  //     final path = await FilePicker.platform.saveFile(
+  //       fileName: '$table.csv',
+  //       // utf8.encode (not codeUnits): umlauts must be written as UTF-8.
+  //       bytes: Uint8List.fromList(utf8.encode(buffer.toString())),
+  //     );
+  //     if (path == null) return; // user cancelled
+  //     if (mounted) {
+  //       ScaffoldMessenger.of(context).showSnackBar(
+  //         SnackBar(content: Text('Exportiert nach: $path')),
+  //       );
+  //     }
+  //   } catch (e) {
+  //     _showError(e);
+  //   }
+  // }
 
   /// Escapes a value for CSV output (semicolon-separated).
   String _csvEscape(String? value) {

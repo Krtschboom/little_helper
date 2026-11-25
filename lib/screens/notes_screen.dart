@@ -156,10 +156,7 @@ class _NotesScreenState extends State<NotesScreen> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      subtitle: Text(
-                        preview.isEmpty
-                            ? _dateLabel(note.updatedAt)
-                            : '$preview\n${_dateLabel(note.updatedAt)}',
+                      subtitle: Text(_dateLabel(note.updatedAt),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),

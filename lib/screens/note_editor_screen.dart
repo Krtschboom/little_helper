@@ -22,7 +22,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   Note? _note;
   final _titleCtrl = TextEditingController();
   final _bodyCtrl = TextEditingController();
-  bool _editMode = true;
+  bool _editMode = false;
   String? _error;
 
   @override
@@ -140,7 +140,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         ),
         const VerticalDivider(width: 8, indent: 8, endIndent: 8),
         _toolbarButton(
-          Icons.looks_one,
+          Icons.numbers_outlined,
           'Überschrift',
           () => _toggleLinePrefix('# '),
         ),
@@ -159,6 +159,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           'Zitat',
           () => _toggleLinePrefix('> '),
         ),
+
+        // format_list_numbered_sharp
         const VerticalDivider(width: 8, indent: 8, endIndent: 8),
         _toolbarButton(
           Icons.link,
